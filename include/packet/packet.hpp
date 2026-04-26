@@ -3,3 +3,4 @@
 #include "packet/ast.hpp"
 #include "packet/lexer.hpp"
 #include "packet/parser.hpp"
+#include "packet/checker.hpp"

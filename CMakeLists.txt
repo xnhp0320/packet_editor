@@ -19,6 +19,7 @@ FetchContent_MakeAvailable(googletest)
 add_library(packet
     src/lexer.cpp
     src/parser.cpp
+    src/checker.cpp
 )
 
 target_include_directories(packet PUBLIC include)
@@ -29,6 +30,10 @@ target_link_libraries(test_lexer packet gtest_main)
 add_executable(test_parser tests/test_parser.cpp)
 target_link_libraries(test_parser packet gtest_main)
 
+add_executable(test_checker tests/test_checker.cpp)
+target_link_libraries(test_checker packet gtest_main)
+
 enable_testing()
-add_test(NAME LexerTest COMMAND test_lexer)
+add_test(NAME LexerTest  COMMAND test_lexer)
 add_test(NAME ParserTest COMMAND test_parser)
+add_test(NAME CheckerTest COMMAND test_checker)
