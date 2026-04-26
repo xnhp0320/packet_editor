@@ -127,7 +127,11 @@ TEST(CheckerTest, CustomHeaderRegistration) {
     ASSERT_TRUE(pkt.has_value());
 
     Checker checker;
-    checker.register_header("MyProto", {"field1", "field2", "field3"});
+    checker.register_header("MyProto", {
+        {"field1", std::nullopt},
+        {"field2", std::nullopt},
+        {"field3", std::nullopt},
+    });
 
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
@@ -141,7 +145,10 @@ TEST(CheckerTest, CustomHeaderUnknownAttr) {
     ASSERT_TRUE(pkt.has_value());
 
     Checker checker;
-    checker.register_header("MyProto", {"field1", "field2"});
+    checker.register_header("MyProto", {
+        {"field1", std::nullopt},
+        {"field2", std::nullopt},
+    });
 
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
@@ -156,4 +163,214 @@ TEST(CheckerTest, ValidateOrExitDoesNotExitOnValid) {
     Checker checker;
     checker.validate_or_exit(*pkt);
     SUCCEED();
+}
+
+TEST(CheckerTest, ValidMacAddr) {
+    Parser parser(R"(Ether(dst="ff:ff:ff:ff:ff:ff",src="00:11:22:33:44:55"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, InvalidMacAddrTooShort) {
+    Parser parser(R"(Ether(dst="ff:ff:ff"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+    EXPECT_TRUE(result.errors[0].find("dst") != std::string::npos);
+}
+
+TEST(CheckerTest, InvalidMacAddrNonHex) {
+    Parser parser(R"(Ether(dst="gg:ff:ff:ff:ff:ff"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+    EXPECT_TRUE(result.errors[0].find("dst") != std::string::npos);
+}
+
+TEST(CheckerTest, InvalidMacAddrMissingColon) {
+    Parser parser(R"(Ether(dst="ffffff:ff:ff:ff:ff"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+}
+
+TEST(CheckerTest, ValidIPv4Addr) {
+    Parser parser(R"(IP(src="192.168.1.1",dst="10.0.0.1"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, InvalidIPv4BadOctet) {
+    Parser parser(R"(IP(src="256.0.0.1"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+    EXPECT_TRUE(result.errors[0].find("src") != std::string::npos);
+}
+
+TEST(CheckerTest, InvalidIPv4TooFewDots) {
+    Parser parser(R"(IP(src="192.168.1"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+}
+
+TEST(CheckerTest, InvalidIPv4NonNumeric) {
+    Parser parser(R"(IP(src="abc.def.ghi.jkl"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+}
+
+TEST(CheckerTest, ValidIPv6Addr) {
+    Parser parser(R"(IPv6(src="2001:db8::1",dst="fe80::1"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, ValidIPv6FullAddr) {
+    Parser parser(R"(IPv6(src="2001:0db8:0000:0000:0000:ff00:0042:8329"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, ValidIPv6Loopback) {
+    Parser parser(R"(IPv6(src="::1"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, InvalidIPv6DoubleDoubleColon) {
+    Parser parser(R"(IPv6(src="2001::10::1"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+}
+
+TEST(CheckerTest, InvalidIPv6BadHexGroup) {
+    Parser parser(R"(IPv6(src="2001:xyz1::1"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+}
+
+TEST(CheckerTest, InvalidIPv6TooManyGroups) {
+    Parser parser(R"(IPv6(src="1:2:3:4::5:6:7:8:9"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+}
+
+TEST(CheckerTest, MacAddrMustBeString) {
+    Parser parser(R"(Ether(dst=123456))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_TRUE(result.errors[0].find("string") != std::string::npos);
+}
+
+TEST(CheckerTest, IPBothSrcAndDstValid) {
+    Parser parser(R"(IP(src="1.2.3.4",dst="5.6.7.8"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, UnknownAttrSkippedNoFormatError) {
+    Parser parser(R"(Ether(unk="not-a-mac-addr-but-unknown-attr"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_EQ(result.warnings.size(), 1);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, CustomTypeRegistration) {
+    Parser parser("MyProto(addr=\"hello\")");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    class AlwaysFails : public TypeValidator {
+    public:
+        std::optional<std::string> validate(const ValueType&) const override {
+            return std::string{"always fails"};
+        }
+    };
+
+    Checker checker;
+    checker.register_type("always_fails", std::make_unique<AlwaysFails>());
+    checker.register_header("MyProto", {{"addr", "always_fails"}});
+
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+    EXPECT_TRUE(result.errors[0].find("always fails") != std::string::npos);
 }

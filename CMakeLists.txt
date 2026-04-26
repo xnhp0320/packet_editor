@@ -20,6 +20,7 @@ add_library(packet
     src/lexer.cpp
     src/parser.cpp
     src/checker.cpp
+    src/type_validator.cpp
 )
 
 target_include_directories(packet PUBLIC include)
