@@ -47,7 +47,7 @@ std::optional<IPv4> IPv4::parse(std::string_view s) {
         if (end == start) return std::nullopt;
         if (end - start > 3) return std::nullopt;
 
-    int val = 0;
+        int val = 0;
         for (size_t i = start; i < end; ++i) {
             if (!std::isdigit(static_cast<unsigned char>(s[i]))) return std::nullopt;
             val = val * 10 + (s[i] - '0');
