@@ -127,7 +127,15 @@ std::optional<Token> Lexer::next() {
     char c = source_[pos_];
     std::optional<Token> result;
 
-    if (c == '"') {
+    if (c == '-' && pos_ + 1 < source_.size() && is_digit(source_[pos_ + 1])) {
+        size_t neg_start = pos_;
+        ++pos_;
+        result = lex_number();
+        if (result) {
+            result->lexeme = source_.substr(neg_start, pos_ - neg_start);
+            result->position = neg_start;
+        }
+    } else if (c == '"') {
         result = lex_string();
     } else if (is_digit(c)) {
         result = lex_number();

@@ -21,6 +21,7 @@ add_library(packet
     src/parser.cpp
     src/checker.cpp
     src/type_validator.cpp
+    src/value.cpp
 )
 
 target_include_directories(packet PUBLIC include)

@@ -3,79 +3,95 @@
 #include <cstdlib>
 #include <format>
 #include <iostream>
+#include <utility>
 
 namespace packet {
+
+namespace {
+
+template <size_t... Is>
+void register_bit_types(Checker& checker, std::index_sequence<Is...>) {
+    (checker.register_type(std::format("b{}", Is + 1),
+                           std::make_unique<BitsValidator<Is + 1>>()), ...);
+}
+
+} // namespace
 
 Checker::Checker() {
     register_type("mac", std::make_unique<MacAddrValidator>());
     register_type("ipv4", std::make_unique<IPv4Validator>());
     register_type("ipv6", std::make_unique<IPv6Validator>());
 
+    register_type("ipv4_range", std::make_unique<RangeValidator<IPv4Validator, 32>>());
+    register_type("ipv6_range", std::make_unique<RangeValidator<IPv6Validator, 128>>());
+
+    register_bit_types(*this, std::make_index_sequence<64>{});
+
     register_header("Ether", {
         {"dst", "mac"},
         {"src", "mac"},
-        {"type", std::nullopt},
+        {"type", "b16"},
     });
 
     register_header("IP", {
-        {"version", std::nullopt},
-        {"ihl", std::nullopt},
-        {"tos", std::nullopt},
-        {"len", std::nullopt},
-        {"id", std::nullopt},
-        {"flags", std::nullopt},
-        {"frag", std::nullopt},
-        {"ttl", std::nullopt},
-        {"proto", std::nullopt},
-        {"src", "ipv4"},
-        {"dst", "ipv4"},
-        {"chksum", std::nullopt},
+        {"version", "b4"},
+        {"ihl",     "b4"},
+        {"tos",     "b8"},
+        {"len",     "b16"},
+        {"id",      "b16"},
+        {"flags",   "b3"},
+        {"frag",    "b13"},
+        {"ttl",     "b8"},
+        {"proto",   "b8"},
+        {"src",     "ipv4_range"},
+        {"dst",     "ipv4_range"},
+        {"chksum",  "b16"},
     });
 
     register_header("IPv6", {
-        {"version", std::nullopt},
-        {"tc", std::nullopt},
-        {"fl", std::nullopt},
-        {"len", std::nullopt},
-        {"nh", std::nullopt},
-        {"hlim", std::nullopt},
-        {"src", "ipv6"},
-        {"dst", "ipv6"},
+        {"version", "b4"},
+        {"tc",      "b8"},
+        {"fl",      "b20"},
+        {"len",     "b16"},
+        {"nh",      "b8"},
+        {"hlim",    "b8"},
+        {"src",     "ipv6_range"},
+        {"dst",     "ipv6_range"},
     });
 
     register_header("TCP", {
-        {"sport", std::nullopt},
-        {"dport", std::nullopt},
-        {"seq", std::nullopt},
-        {"ack", std::nullopt},
-        {"dataofs", std::nullopt},
-        {"reserved", std::nullopt},
-        {"flags", std::nullopt},
-        {"window", std::nullopt},
-        {"chksum", std::nullopt},
-        {"urgptr", std::nullopt},
+        {"sport",    "b16"},
+        {"dport",    "b16"},
+        {"seq",      "b32"},
+        {"ack",      "b32"},
+        {"dataofs",  "b4"},
+        {"reserved", "b3"},
+        {"flags",    "b9"},
+        {"window",   "b16"},
+        {"chksum",   "b16"},
+        {"urgptr",   "b16"},
     });
 
     register_header("UDP", {
-        {"sport", std::nullopt},
-        {"dport", std::nullopt},
-        {"len", std::nullopt},
-        {"chksum", std::nullopt},
+        {"sport",  "b16"},
+        {"dport",  "b16"},
+        {"len",    "b16"},
+        {"chksum", "b16"},
     });
 
     register_header("ICMP", {
-        {"type", std::nullopt},
-        {"code", std::nullopt},
-        {"chksum", std::nullopt},
-        {"id", std::nullopt},
-        {"seq", std::nullopt},
+        {"type",   "b8"},
+        {"code",   "b8"},
+        {"chksum", "b16"},
+        {"id",     "b16"},
+        {"seq",    "b16"},
     });
 
     register_header("VXLAN", {
-        {"flags", std::nullopt},
-        {"reserved", std::nullopt},
-        {"vni", std::nullopt},
-        {"reserved2", std::nullopt},
+        {"flags",     "b8"},
+        {"reserved",  "b24"},
+        {"vni",       "b24"},
+        {"reserved2", "b8"},
     });
 }
 

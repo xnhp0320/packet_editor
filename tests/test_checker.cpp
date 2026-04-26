@@ -374,3 +374,297 @@ TEST(CheckerTest, CustomTypeRegistration) {
     EXPECT_EQ(result.errors.size(), 1);
     EXPECT_TRUE(result.errors[0].find("always fails") != std::string::npos);
 }
+
+TEST(CheckerTest, BitFieldInRange) {
+    Parser parser("UDP(sport=53,dport=53,len=128,chksum=0)");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, BitFieldOutOfRange) {
+    Parser parser("TCP(dport=65536)");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+    EXPECT_TRUE(result.errors[0].find("dport") != std::string::npos);
+    EXPECT_TRUE(result.errors[0].find("16") != std::string::npos);
+}
+
+TEST(CheckerTest, BitFieldNegative) {
+    Parser parser("TCP(sport=-1)");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+}
+
+TEST(CheckerTest, BitFieldAtMax) {
+    Parser parser("TCP(sport=65535,dport=65535)");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, BitFieldB1Zero) {
+    Parser parser("ICMP(type=0)");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+}
+
+TEST(CheckerTest, BitFieldB64) {
+    Parser parser("MyHdr(field=9223372036854775807)");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    checker.register_header("MyHdr", {{"field", "b64"}});
+
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, BitFieldMustBeInteger) {
+    Parser parser(R"(TCP(dport="not-a-number"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_TRUE(result.errors[0].find("expected integer") != std::string::npos);
+}
+
+TEST(CheckerTest, BitFieldB4Max) {
+    Parser parser("IP(version=15,ihl=15)");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+}
+
+TEST(CheckerTest, BitFieldB4Overflow) {
+    Parser parser("IP(version=16,ihl=16)");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 2);
+}
+
+TEST(CheckerTest, BitFieldB20AtMax) {
+    Parser parser("IPv6(fl=1048575)");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+}
+
+TEST(CheckerTest, BitFieldB20Overflow) {
+    Parser parser("IPv6(fl=1048576)");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+    EXPECT_TRUE(result.errors[0].find("20") != std::string::npos);
+}
+
+TEST(CheckerTest, IPv4SingleAddressInRangeType) {
+    Parser parser(R"(IP(src="192.168.1.1",dst="10.0.0.1"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, IPv4CIDR) {
+    Parser parser(R"(IP(src="10.0.0.0/24"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, IPv4CIDRMaskZero) {
+    Parser parser(R"(IP(src="0.0.0.0/0"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+}
+
+TEST(CheckerTest, IPv4CIDRMask32) {
+    Parser parser(R"(IP(src="1.2.3.4/32"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+}
+
+TEST(CheckerTest, IPv4CIDRMaskOutOfRange) {
+    Parser parser(R"(IP(src="10.0.0.0/33"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+    EXPECT_TRUE(result.errors[0].find("33") != std::string::npos);
+}
+
+TEST(CheckerTest, IPv4CIDRBadPrefix) {
+    Parser parser(R"(IP(src="256.0.0.0/24"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+}
+
+TEST(CheckerTest, IPv4CIDREmptyMask) {
+    Parser parser(R"(IP(src="10.0.0.0/"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+}
+
+TEST(CheckerTest, IPv4CIDRNonNumericMask) {
+    Parser parser(R"(IP(src="10.0.0.0/abc"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+}
+
+TEST(CheckerTest, IPv4Range) {
+    Parser parser(R"(IP(src="10.0.0.1-10.0.0.255"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, IPv4RangeBadLeft) {
+    Parser parser(R"(IP(src="256.0.0.1-10.0.0.255"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+}
+
+TEST(CheckerTest, IPv4RangeBadRight) {
+    Parser parser(R"(IP(src="10.0.0.1-10.0.0.256"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+}
+
+TEST(CheckerTest, IPv4RangeEmptyRight) {
+    Parser parser(R"(IP(src="10.0.0.1-"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+}
+
+TEST(CheckerTest, IPv6CIDR) {
+    Parser parser(R"(IPv6(src="2001:db8::/48"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, IPv6CIDRMask128) {
+    Parser parser(R"(IPv6(src="::1/128"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+}
+
+TEST(CheckerTest, IPv6CIDRMaskOutOfRange) {
+    Parser parser(R"(IPv6(src="2001:db8::/129"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+}
+
+TEST(CheckerTest, IPv6Range) {
+    Parser parser(R"(IPv6(src="2001:db8::1-2001:db8::ff"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}

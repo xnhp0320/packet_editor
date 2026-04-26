@@ -83,13 +83,21 @@ std::optional<ValueType> Parser::parse_number_value(std::string_view raw) {
     int64_t value = 0;
     int base = 10;
     auto num = raw;
-    if (raw.starts_with("0x") || raw.starts_with("0X")) {
+    bool negative = false;
+    if (num.starts_with('-')) {
+        negative = true;
+        num = num.substr(1);
+    }
+    if (num.starts_with("0x") || num.starts_with("0X")) {
         base = 16;
-        num = raw.substr(2);
+        num = num.substr(2);
     }
     auto [ptr, ec] = std::from_chars(num.data(), num.data() + num.size(), value, base);
     if (ec != std::errc{}) {
         return std::nullopt;
+    }
+    if (negative) {
+        value = -value;
     }
     return ValueType{value};
 }
