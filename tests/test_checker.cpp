@@ -594,6 +594,62 @@ TEST(CheckerTest, IPv4Range) {
     EXPECT_TRUE(result.errors.empty());
 }
 
+TEST(CheckerTest, IPv4RangeList) {
+    Parser parser(R"(IP(src="[10.0.0.1, 10.0.0.0/24, 10.0.1.1-10.0.1.255]"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, IPv4RangeListSingleElement) {
+    Parser parser(R"(IP(src="[10.0.0.1]"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, IPv4RangeListBadElement) {
+    Parser parser(R"(IP(src="[10.0.0.1, 10.0.0.256]"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+    EXPECT_TRUE(result.errors[0].find("index 1") != std::string::npos);
+}
+
+TEST(CheckerTest, IPv4RangeListEmpty) {
+    Parser parser(R"(IP(src="[]"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+}
+
+TEST(CheckerTest, IPv4RangeListTrailingComma) {
+    Parser parser(R"(IP(src="[10.0.0.1,]"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 1);
+}
+
 TEST(CheckerTest, IPv4RangeBadLeft) {
     Parser parser(R"(IP(src="256.0.0.1-10.0.0.255"))");
     auto pkt = parser.parse();
@@ -660,6 +716,17 @@ TEST(CheckerTest, IPv6CIDRMaskOutOfRange) {
 
 TEST(CheckerTest, IPv6Range) {
     Parser parser(R"(IPv6(src="2001:db8::1-2001:db8::ff"))");
+    auto pkt = parser.parse();
+    ASSERT_TRUE(pkt.has_value());
+
+    Checker checker;
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, IPv6RangeList) {
+    Parser parser(R"(IPv6(src="[2001:db8::1, 2001:db8::/48, 2001:db8::1-2001:db8::ff]"))");
     auto pkt = parser.parse();
     ASSERT_TRUE(pkt.has_value());
 

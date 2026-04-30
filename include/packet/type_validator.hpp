@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace packet {
 
@@ -106,6 +107,69 @@ public:
         }
 
         return inner_.validate(value);
+    }
+};
+
+template <typename T, int MaxPrefix = -1>
+requires std::derived_from<T, TypeValidator>
+class RangeListValidator : public TypeValidator {
+    RangeValidator<T, MaxPrefix> range_;
+
+    static std::string_view trim(std::string_view s) {
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
+            s.remove_prefix(1);
+        }
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) {
+            s.remove_suffix(1);
+        }
+        return s;
+    }
+
+    std::optional<std::string> validate_range(std::string_view s) const {
+        return range_.validate(ValueType{std::string(trim(s))});
+    }
+
+public:
+    std::optional<std::string> validate(const ValueType& value) const override {
+        if (!std::holds_alternative<std::string>(value)) {
+            return range_.validate(value);
+        }
+
+        const auto raw = trim(std::get<std::string>(value));
+        if (!raw.starts_with('[') && !raw.ends_with(']')) {
+            return validate_range(raw);
+        }
+        if (!raw.starts_with('[') || !raw.ends_with(']')) {
+            return std::format("malformed range list '{}'", std::get<std::string>(value));
+        }
+
+        auto content = raw.substr(1, raw.size() - 2);
+        if (trim(content).empty()) {
+            return std::string{"empty range list"};
+        }
+
+        size_t index = 0;
+        size_t item_start = 0;
+        while (item_start <= content.size()) {
+            auto comma = content.find(',', item_start);
+            auto item = comma == std::string_view::npos
+                      ? content.substr(item_start)
+                      : content.substr(item_start, comma - item_start);
+            item = trim(item);
+            if (item.empty()) {
+                return std::format("empty range at index {}", index);
+            }
+            if (auto err = validate_range(item)) {
+                return std::format("invalid range at index {}: {}", index, *err);
+            }
+            if (comma == std::string_view::npos) {
+                break;
+            }
+            item_start = comma + 1;
+            ++index;
+        }
+
+        return std::nullopt;
     }
 };
 

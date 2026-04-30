@@ -24,6 +24,8 @@ Checker::Checker() {
 
     register_type("ipv4_range", std::make_unique<RangeValidator<IPv4Validator, 32>>());
     register_type("ipv6_range", std::make_unique<RangeValidator<IPv6Validator, 128>>());
+    register_type("ipv4_ranges", std::make_unique<RangeListValidator<IPv4Validator, 32>>());
+    register_type("ipv6_ranges", std::make_unique<RangeListValidator<IPv6Validator, 128>>());
 
     register_bit_types(*this, std::make_index_sequence<64>{});
 
@@ -43,8 +45,8 @@ Checker::Checker() {
         {"frag",    "b13"},
         {"ttl",     "b8"},
         {"proto",   "b8"},
-        {"src",     "ipv4_range"},
-        {"dst",     "ipv4_range"},
+        {"src",     "ipv4_ranges"},
+        {"dst",     "ipv4_ranges"},
         {"chksum",  "b16"},
     });
 
@@ -55,8 +57,8 @@ Checker::Checker() {
         {"len",     "b16"},
         {"nh",      "b8"},
         {"hlim",    "b8"},
-        {"src",     "ipv6_range"},
-        {"dst",     "ipv6_range"},
+        {"src",     "ipv6_ranges"},
+        {"dst",     "ipv6_ranges"},
     });
 
     register_header("TCP", {
