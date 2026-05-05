@@ -3,6 +3,8 @@
 #include <charconv>
 #include <cstdint>
 #include <system_error>
+#include <type_traits>
+#include <utility>
 
 namespace packet {
 
@@ -141,6 +143,32 @@ std::optional<Attribute> Parser::parse_attribute() {
     return attr;
 }
 
+std::optional<ValueType> Parser::parse_value() {
+    Token val_tok = lexer_.peek();
+    if (val_tok.type == TokenType::StringLiteral) {
+        lexer_.next();
+        auto val = parse_string_value(val_tok.lexeme);
+        if (!val) {
+            error_ = "invalid string escape sequence";
+            return std::nullopt;
+        }
+        return val;
+    }
+
+    if (val_tok.type == TokenType::IntegerLiteral) {
+        lexer_.next();
+        auto val = parse_number_value(val_tok.lexeme);
+        if (!val) {
+            error_ = "invalid integer literal";
+            return std::nullopt;
+        }
+        return val;
+    }
+
+    error_ = "expected string or integer value";
+    return std::nullopt;
+}
+
 std::optional<Header> Parser::parse_header() {
     Token proto_tok = lexer_.peek();
     if (proto_tok.type != TokenType::Identifier) {
@@ -178,7 +206,7 @@ std::optional<Header> Parser::parse_header() {
     return Header{std::move(protocol), std::move(attrs)};
 }
 
-std::optional<Packet> Parser::parse() {
+std::optional<PacketExpression> Parser::parse_packet_expression() {
     Packet result;
     auto header = parse_header();
     if (!header) {
@@ -195,12 +223,91 @@ std::optional<Packet> Parser::parse() {
         result.push_back(std::move(*next_header));
     }
 
+    return PacketExpression{std::move(result)};
+}
+
+std::optional<Expression> Parser::parse_expression() {
+    if (lexer_.peek().type == TokenType::StringLiteral ||
+        lexer_.peek().type == TokenType::IntegerLiteral) {
+        auto value = parse_value();
+        if (!value) {
+            return std::nullopt;
+        }
+        return std::visit([](auto&& v) -> Expression {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, std::string>) {
+                return StringExpression{std::move(v)};
+            } else {
+                return IntegerExpression{v};
+            }
+        }, std::move(*value));
+    }
+
+    auto packet = parse_packet_expression();
+    if (!packet) {
+        return std::nullopt;
+    }
+    return std::move(*packet);
+}
+
+std::optional<Variable> Parser::parse_variable() {
+    Token name_tok = lexer_.peek();
+    if (name_tok.type != TokenType::Identifier) {
+        error_ = "expected variable name";
+        return std::nullopt;
+    }
+
+    std::string name(name_tok.lexeme);
+    lexer_.next();
+
+    if (!consume(TokenType::Colon)) {
+        return std::nullopt;
+    }
+
+    auto expression = parse_expression();
+    if (!expression) {
+        return std::nullopt;
+    }
+
+    return Variable{std::move(name), std::move(*expression)};
+}
+
+std::optional<Program> Parser::parse_program() {
+    Program program;
+
+    while (lexer_.peek().type != TokenType::EndOfFile) {
+        auto variable = parse_variable();
+        if (!variable) {
+            return std::nullopt;
+        }
+        program.variables.push_back(std::move(*variable));
+    }
+
+    return program;
+}
+
+std::optional<Packet> Parser::parse_packet() {
+    auto expression = parse_expression();
+    if (!expression) {
+        return std::nullopt;
+    }
+
     if (lexer_.peek().type != TokenType::EndOfFile) {
         error_ = "unexpected token after packet";
         return std::nullopt;
     }
 
-    return result;
+    auto value = evaluate(*expression);
+    if (!std::holds_alternative<Packet>(value)) {
+        error_ = "expected packet expression";
+        return std::nullopt;
+    }
+
+    return std::get<Packet>(std::move(value));
+}
+
+std::optional<Program> Parser::parse() {
+    return parse_program();
 }
 
 } // namespace packet

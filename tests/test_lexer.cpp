@@ -32,7 +32,7 @@ TEST(LexerTest, Identifiers) {
 }
 
 TEST(LexerTest, Symbols) {
-    Lexer lexer("= ( ) , /");
+    Lexer lexer("= ( ) , / :");
     auto t = lexer.next();
     ASSERT_TRUE(t.has_value());
     EXPECT_EQ(t->type, TokenType::Equal);
@@ -52,6 +52,10 @@ TEST(LexerTest, Symbols) {
     t = lexer.next();
     ASSERT_TRUE(t.has_value());
     EXPECT_EQ(t->type, TokenType::Slash);
+
+    t = lexer.next();
+    ASSERT_TRUE(t.has_value());
+    EXPECT_EQ(t->type, TokenType::Colon);
 
     t = lexer.next();
     ASSERT_TRUE(t.has_value());

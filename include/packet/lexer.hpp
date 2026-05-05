@@ -16,6 +16,7 @@ enum class TokenType {
     RightParen,
     Comma,
     Slash,
+    Colon,
     EndOfFile,
 };
 

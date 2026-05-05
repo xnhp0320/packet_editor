@@ -7,7 +7,7 @@ using namespace packet;
 
 TEST(ParserTest, SingleHeaderNoAttrs) {
     Parser parser("Ether");
-    auto pkt = parser.parse();
+    auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
     EXPECT_EQ(pkt->size(), 1);
     EXPECT_EQ((*pkt)[0].protocol, "Ether");
@@ -16,7 +16,7 @@ TEST(ParserTest, SingleHeaderNoAttrs) {
 
 TEST(ParserTest, SingleHeaderWithAttrs) {
     Parser parser(R"(Ether(dst="ff:ff:ff:ff:ff:ff",src="00:11:22:33:44:55"))");
-    auto pkt = parser.parse();
+    auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
     EXPECT_EQ(pkt->size(), 1);
     EXPECT_EQ((*pkt)[0].protocol, "Ether");
@@ -37,7 +37,7 @@ TEST(ParserTest, SingleHeaderWithAttrs) {
 
 TEST(ParserTest, ScapyStyle) {
     Parser parser(R"(Ether(dst="ff:ff:ff:ff:ff:ff")/IP(src="192.168.1.1",dst="10.0.0.1")/TCP(dport=80))");
-    auto pkt = parser.parse();
+    auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
     EXPECT_EQ(pkt->size(), 3);
 
@@ -61,7 +61,7 @@ TEST(ParserTest, ScapyStyle) {
 
 TEST(ParserTest, HexNumber) {
     Parser parser("Raw(len=0xFF)");
-    auto pkt = parser.parse();
+    auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
     EXPECT_EQ(pkt->size(), 1);
     EXPECT_EQ(std::get<int64_t>(*(*pkt)[0].attributes[0].value), 255);
@@ -69,7 +69,7 @@ TEST(ParserTest, HexNumber) {
 
 TEST(ParserTest, StringEscape) {
     Parser parser(R"(Raw(data="line1\nline2\ttabbed"))");
-    auto pkt = parser.parse();
+    auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
     EXPECT_EQ(pkt->size(), 1);
     auto val = std::get<std::string>(*(*pkt)[0].attributes[0].value);
@@ -78,7 +78,7 @@ TEST(ParserTest, StringEscape) {
 
 TEST(ParserTest, AttributeNameOnly) {
     Parser parser("Flag(URG,ACK,PSH)");
-    auto pkt = parser.parse();
+    auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
     EXPECT_EQ(pkt->size(), 1);
     EXPECT_EQ((*pkt)[0].attributes.size(), 3);
@@ -92,16 +92,92 @@ TEST(ParserTest, AttributeNameOnly) {
 
 TEST(ParserTest, EmptyParens) {
     Parser parser("Ether()");
-    auto pkt = parser.parse();
+    auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
     EXPECT_EQ(pkt->size(), 1);
     EXPECT_EQ((*pkt)[0].protocol, "Ether");
     EXPECT_TRUE((*pkt)[0].attributes.empty());
 }
 
+TEST(ParserTest, PacketVariableWrapper) {
+    Parser parser(R"(PACKET: Ether(dst="ff:ff:ff:ff:ff:ff")/IP(src="192.168.1.1"))");
+    auto program = parser.parse();
+    ASSERT_TRUE(program.has_value());
+    ASSERT_EQ(program->variables.size(), 1);
+    EXPECT_EQ(program->variables[0].name, "PACKET");
+
+    auto value = evaluate(program->variables[0].expression);
+    ASSERT_TRUE(std::holds_alternative<Packet>(value));
+    const auto& pkt = std::get<Packet>(value);
+    EXPECT_EQ(pkt.size(), 2);
+    EXPECT_EQ(pkt[0].protocol, "Ether");
+    EXPECT_EQ(pkt[1].protocol, "IP");
+}
+
+TEST(ParserTest, StringExpression) {
+    Parser parser(R"("hello")");
+    auto expression = parser.parse_expression();
+    ASSERT_TRUE(expression.has_value());
+
+    auto value = evaluate(*expression);
+    ASSERT_TRUE(std::holds_alternative<std::string>(value));
+    EXPECT_EQ(std::get<std::string>(value), "hello");
+}
+
+TEST(ParserTest, IntegerExpression) {
+    Parser parser("42");
+    auto expression = parser.parse_expression();
+    ASSERT_TRUE(expression.has_value());
+
+    auto value = evaluate(*expression);
+    ASSERT_TRUE(std::holds_alternative<int64_t>(value));
+    EXPECT_EQ(std::get<int64_t>(value), 42);
+}
+
+TEST(ParserTest, PacketExpression) {
+    Parser parser("Ether()/TCP(dport=80)");
+    auto expression = parser.parse_expression();
+    ASSERT_TRUE(expression.has_value());
+
+    auto value = evaluate(*expression);
+    ASSERT_TRUE(std::holds_alternative<Packet>(value));
+    const auto& pkt = std::get<Packet>(value);
+    EXPECT_EQ(pkt.size(), 2);
+    EXPECT_EQ(pkt[0].protocol, "Ether");
+    EXPECT_EQ(pkt[1].protocol, "TCP");
+}
+
+TEST(ParserTest, VariableDefinition) {
+    Parser parser("XXX: 1");
+    auto variable = parser.parse_variable();
+    ASSERT_TRUE(variable.has_value());
+    EXPECT_EQ(variable->name, "XXX");
+
+    auto value = evaluate(variable->expression);
+    ASSERT_TRUE(std::holds_alternative<int64_t>(value));
+    EXPECT_EQ(std::get<int64_t>(value), 1);
+}
+
+TEST(ParserTest, ProgramWithVariables) {
+    Parser parser(R"(XXX: 1
+PACKET: IP(src="192.168.0.1")/TCP(dport=80))");
+    auto program = parser.parse();
+    ASSERT_TRUE(program.has_value());
+    ASSERT_EQ(program->variables.size(), 2);
+    EXPECT_EQ(program->variables[0].name, "XXX");
+    EXPECT_EQ(program->variables[1].name, "PACKET");
+
+    auto packet_value = evaluate(program->variables[1].expression);
+    ASSERT_TRUE(std::holds_alternative<Packet>(packet_value));
+    const auto& pkt = std::get<Packet>(packet_value);
+    ASSERT_EQ(pkt.size(), 2);
+    EXPECT_EQ(pkt[0].protocol, "IP");
+    EXPECT_EQ(std::get<std::string>(*pkt[0].attributes[0].value), "192.168.0.1");
+}
+
 TEST(ParserTest, InvalidInput) {
     Parser parser(R"(Ether(dst="unclosed)");
-    auto pkt = parser.parse();
+    auto pkt = parser.parse_packet();
     EXPECT_FALSE(pkt.has_value());
     EXPECT_FALSE(parser.last_error().empty());
 }

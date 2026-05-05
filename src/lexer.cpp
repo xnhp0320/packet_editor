@@ -110,6 +110,7 @@ std::optional<Token> Lexer::lex_symbol() {
         case ')': type = TokenType::RightParen; break;
         case ',': type = TokenType::Comma; break;
         case '/': type = TokenType::Slash; break;
+        case ':': type = TokenType::Colon; break;
         default: return std::nullopt;
     }
     ++pos_;
