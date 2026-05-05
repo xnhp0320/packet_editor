@@ -43,7 +43,9 @@ if(PACKET_BUILD_DPDK)
         message(FATAL_ERROR "DPDK requires libnuma development files. On Debian/Ubuntu, install libnuma-dev.")
     endif()
 
-    set(DPDK_UPSTREAM_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/dpdk)
+    set(DPDK_VERSION v25.11.2)
+    set(DPDK_URL https://github.com/DPDK/dpdk/archive/refs/tags/${DPDK_VERSION}.tar.gz)
+    set(DPDK_URL_HASH SHA256=009c69c6d1e715e38219d3bbff42188bf6eddc4fd85f0028126e3ca3d6989571)
     set(DPDK_SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/dpdk-src)
     set(DPDK_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/dpdk-build)
     set(DPDK_INSTALL_DIR ${CMAKE_CURRENT_BINARY_DIR}/dpdk-install)
@@ -54,13 +56,12 @@ if(PACKET_BUILD_DPDK)
     set(DPDK_DISABLED_DRIVERS "bus/auxiliary,net/mlx5,net/af_packet,net/af_xdp,net/bnxt,net/e1000,net/ena,net/fm10k,net/i40e,net/ice,net/igc,net/ixgbe,net/virtio,net/vmxnet3,net/ark,net/atlantic,net/avp,net/axgbe,net/bnx2x,net/bond,net/cnxk,net/cxgbe,net/dpaa,net/dpaa2,net/enetc,net/enetfec,net/enic,net/failsafe,net/gve,net/hinic,net/hinic3,net/hns3,net/iavf,net/idpf,net/cpfl,net/ionic,net/mana,net/memif,net/mlx4,net/nbl,net/netvsc,net/nfp,net/ngbe,net/ntnic,net/null,net/octeontx,net/octeon_ep,net/pcap,net/pfe,net/qede,net/r8169,net/ring,net/rnp,net/sfc,net/softnic,net/thunderx,net/txgbe,net/vdev_netvsc,net/xsc,net/zxdh,crypto/*,compress/*,event/*,baseband/*,dma/*,raw/*,regex/*,vdpa/*,common/*")
 
     ExternalProject_Add(dpdk_external
+        URL ${DPDK_URL}
+        URL_HASH ${DPDK_URL_HASH}
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         SOURCE_DIR ${DPDK_SOURCE_DIR}
         BINARY_DIR ${DPDK_BUILD_DIR}
         INSTALL_DIR ${DPDK_INSTALL_DIR}
-        DOWNLOAD_COMMAND
-            ${CMAKE_COMMAND} -E rm -rf ${DPDK_SOURCE_DIR}
-            COMMAND ${CMAKE_COMMAND} -E copy_directory ${DPDK_UPSTREAM_SOURCE_DIR} ${DPDK_SOURCE_DIR}
-            COMMAND ${CMAKE_COMMAND} -E rm -f ${DPDK_SOURCE_DIR}/.git
         UPDATE_COMMAND ""
         PATCH_COMMAND
             ${CMAKE_COMMAND}

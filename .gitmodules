@@ -1,4 +1,0 @@
-[submodule "external/dpdk"]
-	path = external/dpdk
-	url = https://github.com/DPDK/dpdk.git
-	shallow = true
