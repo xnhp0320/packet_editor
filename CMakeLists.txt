@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-option(PACKET_BUILD_DPDK "Build the bundled DPDK submodule and link packet against it" ON)
+option(PACKET_BUILD_DPDK "Build the bundled DPDK release and define DPDK::dpdk for future targets" ON)
 
 include(FetchContent)
 
@@ -116,10 +116,6 @@ add_library(packet
 )
 
 target_include_directories(packet PUBLIC include)
-if(PACKET_BUILD_DPDK)
-    add_dependencies(packet dpdk_pkgconfig_args)
-    target_link_libraries(packet PUBLIC DPDK::dpdk)
-endif()
 
 add_executable(test_lexer tests/test_lexer.cpp)
 target_link_libraries(test_lexer packet gtest_main)
