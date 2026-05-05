@@ -117,6 +117,19 @@ add_library(packet
 
 target_include_directories(packet PUBLIC include)
 
+if(PACKET_BUILD_DPDK)
+    add_library(packet_runtime
+        src/runtime.cpp
+    )
+    target_link_libraries(packet_runtime PUBLIC packet DPDK::dpdk)
+
+    add_executable(packet_dpdk_init apps/dpdk_init.cpp)
+    target_link_libraries(packet_dpdk_init PRIVATE packet_runtime)
+
+    add_executable(test_runtime tests/test_runtime.cpp)
+    target_link_libraries(test_runtime packet_runtime gtest_main)
+endif()
+
 add_executable(test_lexer tests/test_lexer.cpp)
 target_link_libraries(test_lexer packet gtest_main)
 
@@ -130,3 +143,6 @@ enable_testing()
 add_test(NAME LexerTest  COMMAND test_lexer)
 add_test(NAME ParserTest COMMAND test_parser)
 add_test(NAME CheckerTest COMMAND test_checker)
+if(PACKET_BUILD_DPDK)
+    add_test(NAME RuntimeTest COMMAND test_runtime)
+endif()

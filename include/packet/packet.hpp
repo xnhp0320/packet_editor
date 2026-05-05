@@ -4,4 +4,5 @@
 #include "packet/lexer.hpp"
 #include "packet/parser.hpp"
 #include "packet/checker.hpp"
+#include "packet/runtime.hpp"
 #include "packet/value.hpp"
