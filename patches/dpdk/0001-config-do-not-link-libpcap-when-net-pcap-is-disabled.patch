@@ -1,0 +1,33 @@
+diff --git a/config/meson.build b/config/meson.build
+index 0cb074a..9cdd8bc 100644
+--- a/config/meson.build
++++ b/config/meson.build
+@@ -283,17 +283,18 @@ if openssl_dep.found()
+     dpdk_conf.set('RTE_HAS_OPENSSL', 1)
+ endif
+ 
+-# check for pcap
+-pcap_dep = dependency('libpcap', required: false, method: 'pkg-config')
+ pcap_lib = is_windows ? 'wpcap' : 'pcap'
+-if not pcap_dep.found()
+-    # pcap got a pkg-config file only in 1.9.0
+-    pcap_dep = cc.find_library(pcap_lib, required: false)
+-endif
+-if (pcap_dep.found() and cc.has_header('pcap.h', dependencies: pcap_dep)
+-        and cc.links(min_c_code, dependencies: pcap_dep))
+-    dpdk_conf.set('RTE_HAS_LIBPCAP', 1)
+-    dpdk_extra_ldflags += '-l@0@'.format(pcap_lib)
++pcap_dep = declare_dependency()
++if not get_option('disable_drivers').contains('net/pcap')
++    pcap_dep = dependency('libpcap', required: false, method: 'pkg-config')
++    if not pcap_dep.found()
++        # pcap got a pkg-config file only in 1.9.0
++        pcap_dep = cc.find_library(pcap_lib, required: false)
++    endif
++    if (pcap_dep.found() and cc.has_header('pcap.h', dependencies: pcap_dep)
++            and cc.links(min_c_code, dependencies: pcap_dep))
++        dpdk_conf.set('RTE_HAS_LIBPCAP', 1)
++    endif
+ endif
+ 
+ # for clang 32-bit compiles we need libatomic for 64-bit atomic ops
