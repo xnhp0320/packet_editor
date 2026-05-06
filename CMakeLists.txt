@@ -111,6 +111,7 @@ add_library(packet
     src/lexer.cpp
     src/parser.cpp
     src/checker.cpp
+    src/registry.cpp
     src/type_validator.cpp
     src/value.cpp
 )

@@ -1,4 +1,5 @@
 #include "packet/checker.hpp"
+#include "packet/registry.hpp"
 #include "packet/parser.hpp"
 
 #include <gtest/gtest.h>
@@ -10,7 +11,8 @@ TEST(CheckerTest, AllKnownHeaders) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -22,7 +24,8 @@ TEST(CheckerTest, UnknownHeader) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -34,7 +37,8 @@ TEST(CheckerTest, KnownAttrsNoWarnings) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.warnings.empty());
@@ -45,7 +49,8 @@ TEST(CheckerTest, UnknownAttributeWarning) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_EQ(result.warnings.size(), 1);
@@ -58,7 +63,8 @@ TEST(CheckerTest, MixedErrorsAndWarnings) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -70,7 +76,8 @@ TEST(CheckerTest, ScapyStyleSemanticCheck) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -82,7 +89,8 @@ TEST(CheckerTest, TcpAllAttrs) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.warnings.empty());
@@ -93,7 +101,8 @@ TEST(CheckerTest, UdpAttrs) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.warnings.empty());
@@ -104,7 +113,8 @@ TEST(CheckerTest, IcmpAttrs) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.warnings.empty());
@@ -115,7 +125,8 @@ TEST(CheckerTest, VxlanAttrs) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.warnings.empty());
@@ -126,8 +137,9 @@ TEST(CheckerTest, CustomHeaderRegistration) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
-    checker.register_header("MyProto", {
+    Registry registry;
+    Checker checker{registry};
+    registry.register_header("MyProto", {
         {"field1", std::nullopt},
         {"field2", std::nullopt},
         {"field3", std::nullopt},
@@ -144,8 +156,9 @@ TEST(CheckerTest, CustomHeaderUnknownAttr) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
-    checker.register_header("MyProto", {
+    Registry registry;
+    Checker checker{registry};
+    registry.register_header("MyProto", {
         {"field1", std::nullopt},
         {"field2", std::nullopt},
     });
@@ -160,7 +173,8 @@ TEST(CheckerTest, ValidateOrExitDoesNotExitOnValid) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     checker.validate_or_exit(*pkt);
     SUCCEED();
 }
@@ -170,7 +184,8 @@ TEST(CheckerTest, ValidMacAddr) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -181,7 +196,8 @@ TEST(CheckerTest, InvalidMacAddrTooShort) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -193,7 +209,8 @@ TEST(CheckerTest, InvalidMacAddrNonHex) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -205,7 +222,8 @@ TEST(CheckerTest, InvalidMacAddrMissingColon) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -216,7 +234,8 @@ TEST(CheckerTest, ValidIPv4Addr) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -227,7 +246,8 @@ TEST(CheckerTest, InvalidIPv4BadOctet) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -239,7 +259,8 @@ TEST(CheckerTest, InvalidIPv4TooFewDots) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -250,7 +271,8 @@ TEST(CheckerTest, InvalidIPv4NonNumeric) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
 }
@@ -260,7 +282,8 @@ TEST(CheckerTest, ValidIPv6Addr) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -271,7 +294,8 @@ TEST(CheckerTest, ValidIPv6FullAddr) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -282,7 +306,8 @@ TEST(CheckerTest, ValidIPv6Loopback) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -293,7 +318,8 @@ TEST(CheckerTest, InvalidIPv6DoubleDoubleColon) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -304,7 +330,8 @@ TEST(CheckerTest, InvalidIPv6BadHexGroup) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
 }
@@ -314,7 +341,8 @@ TEST(CheckerTest, InvalidIPv6TooManyGroups) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
 }
@@ -324,7 +352,8 @@ TEST(CheckerTest, MacAddrMustBeString) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_TRUE(result.errors[0].find("string") != std::string::npos);
@@ -335,7 +364,8 @@ TEST(CheckerTest, IPBothSrcAndDstValid) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -346,7 +376,8 @@ TEST(CheckerTest, UnknownAttrSkippedNoFormatError) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_EQ(result.warnings.size(), 1);
@@ -365,9 +396,10 @@ TEST(CheckerTest, CustomTypeRegistration) {
         }
     };
 
-    Checker checker;
-    checker.register_type("always_fails", std::make_unique<AlwaysFails>());
-    checker.register_header("MyProto", {{"addr", "always_fails"}});
+    Registry registry;
+    Checker checker{registry};
+    registry.register_type("always_fails", std::make_unique<AlwaysFails>());
+    registry.register_header("MyProto", {{"addr", "always_fails"}});
 
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
@@ -380,7 +412,8 @@ TEST(CheckerTest, BitFieldInRange) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -391,7 +424,8 @@ TEST(CheckerTest, BitFieldOutOfRange) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -404,7 +438,8 @@ TEST(CheckerTest, BitFieldNegative) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -415,7 +450,8 @@ TEST(CheckerTest, BitFieldAtMax) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -426,7 +462,8 @@ TEST(CheckerTest, BitFieldB1Zero) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
 }
@@ -436,8 +473,9 @@ TEST(CheckerTest, BitFieldB64) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
-    checker.register_header("MyHdr", {{"field", "b64"}});
+    Registry registry;
+    Checker checker{registry};
+    registry.register_header("MyHdr", {{"field", "b64"}});
 
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
@@ -449,7 +487,8 @@ TEST(CheckerTest, BitFieldMustBeInteger) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_TRUE(result.errors[0].find("expected integer") != std::string::npos);
@@ -460,7 +499,8 @@ TEST(CheckerTest, BitFieldB4Max) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
 }
@@ -470,7 +510,8 @@ TEST(CheckerTest, BitFieldB4Overflow) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 2);
@@ -481,7 +522,8 @@ TEST(CheckerTest, BitFieldB20AtMax) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
 }
@@ -491,7 +533,8 @@ TEST(CheckerTest, BitFieldB20Overflow) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -503,7 +546,8 @@ TEST(CheckerTest, IPv4SingleAddressInRangeType) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -514,7 +558,8 @@ TEST(CheckerTest, IPv4CIDR) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -525,7 +570,8 @@ TEST(CheckerTest, IPv4CIDRMaskZero) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
 }
@@ -535,7 +581,8 @@ TEST(CheckerTest, IPv4CIDRMask32) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
 }
@@ -545,7 +592,8 @@ TEST(CheckerTest, IPv4CIDRMaskOutOfRange) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -557,7 +605,8 @@ TEST(CheckerTest, IPv4CIDRBadPrefix) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -568,7 +617,8 @@ TEST(CheckerTest, IPv4CIDREmptyMask) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
 }
@@ -578,7 +628,8 @@ TEST(CheckerTest, IPv4CIDRNonNumericMask) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
 }
@@ -588,7 +639,8 @@ TEST(CheckerTest, IPv4Range) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -599,7 +651,8 @@ TEST(CheckerTest, IPv4RangeList) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -610,7 +663,8 @@ TEST(CheckerTest, IPv4RangeListSingleElement) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -621,7 +675,8 @@ TEST(CheckerTest, IPv4RangeListBadElement) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -633,7 +688,8 @@ TEST(CheckerTest, IPv4RangeListEmpty) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -644,7 +700,8 @@ TEST(CheckerTest, IPv4RangeListTrailingComma) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -655,7 +712,8 @@ TEST(CheckerTest, IPv4RangeBadLeft) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -666,7 +724,8 @@ TEST(CheckerTest, IPv4RangeBadRight) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -677,7 +736,8 @@ TEST(CheckerTest, IPv4RangeEmptyRight) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
 }
@@ -687,7 +747,8 @@ TEST(CheckerTest, IPv6CIDR) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -698,7 +759,8 @@ TEST(CheckerTest, IPv6CIDRMask128) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
 }
@@ -708,7 +770,8 @@ TEST(CheckerTest, IPv6CIDRMaskOutOfRange) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.errors.size(), 1);
@@ -719,7 +782,8 @@ TEST(CheckerTest, IPv6Range) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
@@ -730,7 +794,8 @@ TEST(CheckerTest, IPv6RangeList) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
-    Checker checker;
+    Registry registry;
+    Checker checker{registry};
     auto result = checker.check(*pkt);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());

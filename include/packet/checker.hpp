@@ -1,23 +1,16 @@
 #pragma once
 
 #include "packet/ast.hpp"
-#include "packet/type_validator.hpp"
+#include "packet/registry.hpp"
 
-#include <memory>
-#include <optional>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace packet {
 
 class Checker {
 public:
-    struct AttrSpec {
-        std::string name;
-        std::optional<std::string> type_name;
-    };
+    using AttrSpec = packet::AttrSpec;
 
     struct Result {
         bool ok;
@@ -25,18 +18,18 @@ public:
         std::vector<std::string> errors;
     };
 
-    Checker();
-
-    Checker& register_type(std::string type_name, std::unique_ptr<TypeValidator> validator);
-    Checker& register_header(std::string protocol, std::vector<AttrSpec> attrs);
+    Checker(const TypeRegistry& type_validators,
+            const AttrNameRegistry& attr_names,
+            const AttrTypeRegistry& attr_types);
+    explicit Checker(const Registry& registry);
 
     Result check(const Packet& packet) const;
     void validate_or_exit(const Packet& packet) const;
 
 private:
-    std::unordered_map<std::string, std::unique_ptr<TypeValidator>> type_validators_;
-    std::unordered_map<std::string, std::unordered_set<std::string>> attr_names_;
-    std::unordered_map<std::string, std::unordered_map<std::string, std::string>> attr_types_;
+    const TypeRegistry& type_validators_;
+    const AttrNameRegistry& attr_names_;
+    const AttrTypeRegistry& attr_types_;
 };
 
 } // namespace packet

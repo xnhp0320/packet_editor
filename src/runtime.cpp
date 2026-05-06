@@ -1,7 +1,5 @@
 #include "packet/runtime.hpp"
 
-#include "packet/checker.hpp"
-
 #include <rte_eal.h>
 #include <rte_errno.h>
 
@@ -14,6 +12,13 @@
 #include <vector>
 
 namespace packet {
+
+Runtime::Runtime() = default;
+
+Runtime::Runtime(Registry registry)
+    : registry_(std::move(registry))
+{
+}
 
 std::optional<std::vector<std::string>> Runtime::split_dpdk_args(std::string_view args,
                                                                  std::string& error) {
@@ -133,13 +138,13 @@ std::optional<Runtime::Config> Runtime::build_config(const Program& program, Res
     return config;
 }
 
-std::optional<Runtime::Config> Runtime::checked_config(const Program& program, Result& result) {
+std::optional<Runtime::Config> Runtime::checked_config(const Program& program, Result& result) const {
     auto config = build_config(program, result);
     if (!config) {
         return std::nullopt;
     }
 
-    Checker checker;
+    Checker checker{registry_};
     auto check = checker.check(config->packet);
     result.warnings.insert(result.warnings.end(), check.warnings.begin(), check.warnings.end());
     result.errors.insert(result.errors.end(), check.errors.begin(), check.errors.end());
