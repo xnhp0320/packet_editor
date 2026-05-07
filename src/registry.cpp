@@ -1,6 +1,8 @@
 #include "packet/registry.hpp"
 
+#include <charconv>
 #include <format>
+#include <string_view>
 #include <utility>
 
 namespace packet {
@@ -11,6 +13,66 @@ template <size_t... Is>
 void register_bit_types(Registry& registry, std::index_sequence<Is...>) {
     (registry.register_type(std::format("b{}", Is + 1),
                             std::make_unique<BitsValidator<Is + 1>>()), ...);
+}
+
+size_t bit_width_for_type(const std::optional<std::string>& type_name) {
+    if (!type_name) {
+        return 0;
+    }
+
+    const auto type = std::string_view{*type_name};
+    if (type == "mac") {
+        return 48;
+    }
+    if (type == "ipv4" || type == "ipv4_range" || type == "ipv4_ranges") {
+        return 32;
+    }
+    if (type == "ipv6" || type == "ipv6_range" || type == "ipv6_ranges") {
+        return 128;
+    }
+    if (type.starts_with('b')) {
+        size_t width = 0;
+        auto digits = type.substr(1);
+        auto [ptr, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), width);
+        if (ec == std::errc{} && ptr == digits.data() + digits.size()) {
+            return width;
+        }
+    }
+    return 0;
+}
+
+ConstructorValue default_value_for_type(const std::optional<std::string>& type_name) {
+    if (!type_name) {
+        return uint64_t{0};
+    }
+
+    const auto type = std::string_view{*type_name};
+    if (type == "mac") {
+        return MacAddr::from_bytes({});
+    }
+    if (type == "ipv4") {
+        return IPv4::from_bytes({});
+    }
+    if (type == "ipv6") {
+        return IPv6::from_bytes({});
+    }
+    if (type == "ipv4_range") {
+        auto zero = IPv4::from_bytes({});
+        return IPv4Range{zero, zero};
+    }
+    if (type == "ipv6_range") {
+        auto zero = IPv6::from_bytes({});
+        return IPv6Range{zero, zero};
+    }
+    if (type == "ipv4_ranges") {
+        auto zero = IPv4::from_bytes({});
+        return std::vector<IPv4Range>{IPv4Range{zero, zero}};
+    }
+    if (type == "ipv6_ranges") {
+        auto zero = IPv6::from_bytes({});
+        return std::vector<IPv6Range>{IPv6Range{zero, zero}};
+    }
+    return uint64_t{0};
 }
 
 } // namespace
@@ -34,14 +96,14 @@ Registry::Registry() {
     });
 
     register_header("IP", {
-        {"version", "b4"},
-        {"ihl",     "b4"},
+        {"version", "b4", ConstructorValue{uint64_t{4}}},
+        {"ihl",     "b4", ConstructorValue{uint64_t{5}}},
         {"tos",     "b8"},
         {"len",     "b16"},
         {"id",      "b16"},
         {"flags",   "b3"},
         {"frag",    "b13"},
-        {"ttl",     "b8"},
+        {"ttl",     "b8", ConstructorValue{uint64_t{64}}},
         {"proto",   "b8"},
         {"src",     "ipv4_ranges"},
         {"dst",     "ipv4_ranges"},
@@ -49,12 +111,12 @@ Registry::Registry() {
     });
 
     register_header("IPv6", {
-        {"version", "b4"},
+        {"version", "b4", ConstructorValue{uint64_t{6}}},
         {"tc",      "b8"},
         {"fl",      "b20"},
         {"len",     "b16"},
         {"nh",      "b8"},
-        {"hlim",    "b8"},
+        {"hlim",    "b8", ConstructorValue{uint64_t{64}}},
         {"src",     "ipv6_ranges"},
         {"dst",     "ipv6_ranges"},
     });
@@ -64,7 +126,7 @@ Registry::Registry() {
         {"dport",    "b16"},
         {"seq",      "b32"},
         {"ack",      "b32"},
-        {"dataofs",  "b4"},
+        {"dataofs",  "b4", ConstructorValue{uint64_t{5}}},
         {"reserved", "b3"},
         {"flags",    "b9"},
         {"window",   "b16"},
@@ -88,7 +150,7 @@ Registry::Registry() {
     });
 
     register_header("VXLAN", {
-        {"flags",     "b8"},
+        {"flags",     "b8", ConstructorValue{uint64_t{0x08}}},
         {"reserved",  "b24"},
         {"vni",       "b24"},
         {"reserved2", "b8"},
@@ -103,12 +165,25 @@ Registry& Registry::register_type(std::string type_name, std::unique_ptr<TypeVal
 Registry& Registry::register_header(std::string protocol, std::vector<AttrSpec> attrs) {
     auto& names = attr_names_[protocol];
     auto& types = attr_types_[protocol];
+    names.clear();
+    types.clear();
+    HeaderSpec header_spec{protocol, {}, 0};
     for (auto& attr : attrs) {
         names.insert(attr.name);
+        auto bit_width = bit_width_for_type(attr.type_name);
+        header_spec.fields.push_back(FieldSpec{
+            attr.name,
+            attr.type_name,
+            header_spec.bit_width,
+            bit_width,
+            attr.default_value.value_or(default_value_for_type(attr.type_name)),
+        });
+        header_spec.bit_width += bit_width;
         if (attr.type_name) {
             types[attr.name] = *attr.type_name;
         }
     }
+    header_specs_[protocol] = std::move(header_spec);
     return *this;
 }
 
@@ -122,6 +197,18 @@ const AttrNameRegistry& Registry::attr_names() const {
 
 const AttrTypeRegistry& Registry::attr_types() const {
     return attr_types_;
+}
+
+const HeaderSpecRegistry& Registry::header_specs() const {
+    return header_specs_;
+}
+
+const HeaderSpec* Registry::find_header(std::string_view protocol) const {
+    auto it = header_specs_.find(std::string{protocol});
+    if (it == header_specs_.end()) {
+        return nullptr;
+    }
+    return &it->second;
 }
 
 } // namespace packet

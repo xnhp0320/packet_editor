@@ -29,6 +29,10 @@ std::optional<MacAddr> MacAddr::parse(std::string_view s) {
     return MacAddr{bytes};
 }
 
+MacAddr MacAddr::from_bytes(std::array<uint8_t, 6> b) {
+    return MacAddr{b};
+}
+
 std::string MacAddr::to_string() const {
     return std::format("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                        bytes_[0], bytes_[1], bytes_[2],
@@ -59,6 +63,10 @@ std::optional<IPv4> IPv4::parse(std::string_view s) {
 
     if (dots != 3) return std::nullopt;
     return IPv4{bytes};
+}
+
+IPv4 IPv4::from_bytes(std::array<uint8_t, 4> b) {
+    return IPv4{b};
 }
 
 std::string IPv4::to_string() const {
@@ -134,6 +142,10 @@ std::optional<IPv6> IPv6::parse(std::string_view s) {
     }
 
     return IPv6{bytes};
+}
+
+IPv6 IPv6::from_bytes(std::array<uint8_t, 16> b) {
+    return IPv6{b};
 }
 
 std::string IPv6::to_string() const {

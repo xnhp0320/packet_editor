@@ -1,10 +1,13 @@
 #pragma once
 
 #include "packet/type_validator.hpp"
+#include "packet/value.hpp"
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -14,11 +17,27 @@ namespace packet {
 struct AttrSpec {
     std::string name;
     std::optional<std::string> type_name;
+    std::optional<ConstructorValue> default_value;
+};
+
+struct FieldSpec {
+    std::string name;
+    std::optional<std::string> type_name;
+    size_t bit_offset = 0;
+    size_t bit_width = 0;
+    ConstructorValue default_value = uint64_t{0};
+};
+
+struct HeaderSpec {
+    std::string protocol;
+    std::vector<FieldSpec> fields;
+    size_t bit_width = 0;
 };
 
 using TypeRegistry = std::unordered_map<std::string, std::unique_ptr<TypeValidator>>;
 using AttrNameRegistry = std::unordered_map<std::string, std::unordered_set<std::string>>;
 using AttrTypeRegistry = std::unordered_map<std::string, std::unordered_map<std::string, std::string>>;
+using HeaderSpecRegistry = std::unordered_map<std::string, HeaderSpec>;
 
 class Registry {
 public:
@@ -30,11 +49,14 @@ public:
     const TypeRegistry& type_validators() const;
     const AttrNameRegistry& attr_names() const;
     const AttrTypeRegistry& attr_types() const;
+    const HeaderSpecRegistry& header_specs() const;
+    const HeaderSpec* find_header(std::string_view protocol) const;
 
 private:
     TypeRegistry type_validators_;
     AttrNameRegistry attr_names_;
     AttrTypeRegistry attr_types_;
+    HeaderSpecRegistry header_specs_;
 };
 
 } // namespace packet

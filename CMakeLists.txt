@@ -137,6 +137,7 @@ add_library(packet
     src/lexer.cpp
     src/parser.cpp
     src/checker.cpp
+    src/packet_constructor.cpp
     src/registry.cpp
     src/type_validator.cpp
     src/value.cpp
@@ -166,10 +167,14 @@ target_link_libraries(test_parser packet gtest_main)
 add_executable(test_checker tests/test_checker.cpp)
 target_link_libraries(test_checker packet gtest_main)
 
+add_executable(test_packet_constructor tests/test_packet_constructor.cpp)
+target_link_libraries(test_packet_constructor packet gtest_main)
+
 enable_testing()
 add_test(NAME LexerTest  COMMAND test_lexer)
 add_test(NAME ParserTest COMMAND test_parser)
 add_test(NAME CheckerTest COMMAND test_checker)
+add_test(NAME PacketConstructorTest COMMAND test_packet_constructor)
 if(PACKET_BUILD_DPDK)
     add_test(NAME RuntimeTest COMMAND test_runtime)
 endif()
