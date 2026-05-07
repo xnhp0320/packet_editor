@@ -54,6 +54,31 @@ if(PACKET_BUILD_DPDK)
     set(DPDK_LIBPCAP_PATCH ${CMAKE_CURRENT_SOURCE_DIR}/patches/dpdk/0001-config-do-not-link-libpcap-when-net-pcap-is-disabled.patch)
     set(DPDK_PKG_CONFIG_PATH ${DPDK_INSTALL_DIR}/lib/x86_64-linux-gnu/pkgconfig:${DPDK_INSTALL_DIR}/lib/pkgconfig:${DPDK_INSTALL_DIR}/share/pkgconfig)
     set(DPDK_DISABLED_DRIVERS "bus/auxiliary,net/mlx5,net/af_packet,net/af_xdp,net/bnxt,net/e1000,net/ena,net/fm10k,net/i40e,net/ice,net/igc,net/ixgbe,net/virtio,net/vmxnet3,net/ark,net/atlantic,net/avp,net/axgbe,net/bnx2x,net/bond,net/cnxk,net/cxgbe,net/dpaa,net/dpaa2,net/enetc,net/enetfec,net/enic,net/failsafe,net/gve,net/hinic,net/hinic3,net/hns3,net/iavf,net/idpf,net/cpfl,net/ionic,net/mana,net/memif,net/mlx4,net/nbl,net/netvsc,net/nfp,net/ngbe,net/ntnic,net/null,net/octeontx,net/octeon_ep,net/pcap,net/pfe,net/qede,net/r8169,net/ring,net/rnp,net/sfc,net/softnic,net/thunderx,net/txgbe,net/vdev_netvsc,net/xsc,net/zxdh,crypto/*,compress/*,event/*,baseband/*,dma/*,raw/*,regex/*,vdpa/*,common/*")
+    set(DPDK_MESON_PLATFORM_ARGS)
+
+    set(PACKET_APPLE_SILICON_LINUX_VM OFF)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        set(PACKET_LINUX_MACHINE_INFO "")
+        foreach(machine_info_file
+            /sys/devices/virtual/dmi/id/sys_vendor
+            /sys/devices/virtual/dmi/id/product_name
+            /proc/cpuinfo
+        )
+            if(EXISTS ${machine_info_file})
+                file(READ ${machine_info_file} machine_info)
+                string(APPEND PACKET_LINUX_MACHINE_INFO "${machine_info}\n")
+            endif()
+        endforeach()
+
+        if(PACKET_LINUX_MACHINE_INFO MATCHES "Apple Inc\\.|Apple Virtualization|CPU implementer[ \t]*:[ \t]*0x61")
+            set(PACKET_APPLE_SILICON_LINUX_VM ON)
+        endif()
+    endif()
+
+    if(PACKET_APPLE_SILICON_LINUX_VM)
+        list(APPEND DPDK_MESON_PLATFORM_ARGS -Dplatform=generic)
+        message(STATUS "Apple Silicon Linux VM detected; configuring DPDK with Meson -Dplatform=generic")
+    endif()
 
     ExternalProject_Add(dpdk_external
         URL ${DPDK_URL}
@@ -74,6 +99,7 @@ if(PACKET_BUILD_DPDK)
                 --prefix ${DPDK_INSTALL_DIR}
                 ${DPDK_BUILD_DIR}
                 ${DPDK_SOURCE_DIR}
+                ${DPDK_MESON_PLATFORM_ARGS}
                 -Ddisable_drivers=${DPDK_DISABLED_DRIVERS}
                 -Ddisable_libs=bpf,metrics,vhost,port
                 -Ddisable_apps=*
