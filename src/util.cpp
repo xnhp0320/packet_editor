@@ -28,6 +28,9 @@ size_t bit_width_for_type_name(std::string_view type_name) {
     if (type_name == "ipv6" || type_name == "ipv6_range" || type_name == "ipv6_ranges") {
         return 128;
     }
+    if (auto width = bit_range_width_for_type_name(type_name)) {
+        return *width;
+    }
     if (type_name.starts_with('b')) {
         size_t width = 0;
         auto digits = type_name.substr(1);
@@ -41,6 +44,21 @@ size_t bit_width_for_type_name(std::string_view type_name) {
 
 size_t bit_width_for_type_name(const std::optional<std::string>& type_name) {
     return type_name ? bit_width_for_type_name(std::string_view{*type_name}) : 0;
+}
+
+std::optional<size_t> bit_range_width_for_type_name(std::string_view type_name) {
+    constexpr std::string_view suffix = "_ranges";
+    if (!type_name.starts_with('b') || !type_name.ends_with(suffix)) {
+        return std::nullopt;
+    }
+
+    const auto digits = type_name.substr(1, type_name.size() - 1 - suffix.size());
+    size_t width = 0;
+    auto [ptr, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), width);
+    if (ec != std::errc{} || ptr != digits.data() + digits.size() || width < 1 || width > 64) {
+        return std::nullopt;
+    }
+    return width;
 }
 
 ConstructorValue default_constructor_value_for_type(std::string_view type_name) {
@@ -97,6 +115,28 @@ std::optional<std::string> validate_bit_value(const ValueType& value, size_t bit
     return std::nullopt;
 }
 
+std::optional<std::string> validate_bit_range_value(const ValueType& value, size_t bit_width) {
+    if (std::holds_alternative<int64_t>(value)) {
+        return validate_bit_value(value, bit_width);
+    }
+    if (!std::holds_alternative<std::string>(value)) {
+        return std::string{"expected integer or string value"};
+    }
+
+    const auto raw = trim_ascii_whitespace(std::get<std::string>(value));
+    std::string error;
+    if (raw.starts_with('[') || raw.ends_with(']') || raw.find('-') != std::string_view::npos) {
+        if (!parse_uint_ranges(raw, bit_width, error)) {
+            return error;
+        }
+        return std::nullopt;
+    }
+    if (!parse_uint_value(raw, bit_width, error)) {
+        return error;
+    }
+    return std::nullopt;
+}
+
 namespace {
 
 std::array<uint8_t, 4> ipv4_bytes(const IPv4& ip) {
@@ -147,11 +187,11 @@ std::optional<int> parse_prefix(std::string_view s, int max_prefix, std::string&
     return prefix;
 }
 
-template <typename Range>
+template <typename Range, typename ParseOne>
 std::optional<std::vector<Range>> parse_range_list(
     std::string_view raw,
     std::string& error,
-    std::optional<Range> (*parse_one)(std::string_view, std::string&)) {
+    ParseOne parse_one) {
     auto s = trim_ascii_whitespace(raw);
     if (!s.starts_with('[') && !s.ends_with(']')) {
         auto range = parse_one(s, error);
@@ -200,6 +240,67 @@ std::optional<std::vector<Range>> parse_range_list(
 }
 
 } // namespace
+
+std::optional<uint64_t> parse_uint_value(std::string_view raw, size_t bit_width, std::string& error) {
+    auto s = trim_ascii_whitespace(raw);
+    if (s.empty()) {
+        error = "empty integer value";
+        return std::nullopt;
+    }
+
+    uint64_t value = 0;
+    auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), value);
+    if (ec != std::errc{} || ptr != s.data() + s.size()) {
+        error = std::format("invalid integer value '{}'", s);
+        return std::nullopt;
+    }
+
+    if (bit_width < 64) {
+        const auto max = (uint64_t{1} << bit_width) - 1;
+        if (value > max) {
+            error = std::format("value {} does not fit in {} bits", value, bit_width);
+            return std::nullopt;
+        }
+    }
+
+    return value;
+}
+
+std::optional<UIntRange> parse_uint_range(std::string_view raw, size_t bit_width, std::string& error) {
+    auto s = trim_ascii_whitespace(raw);
+    if (auto dash = s.find('-'); dash != std::string_view::npos) {
+        auto left = parse_uint_value(s.substr(0, dash), bit_width, error);
+        if (!left) {
+            return std::nullopt;
+        }
+        auto right = parse_uint_value(s.substr(dash + 1), bit_width, error);
+        if (!right) {
+            return std::nullopt;
+        }
+        if (*left > *right) {
+            error = std::format("range start {} is greater than range end {}", *left, *right);
+            return std::nullopt;
+        }
+        return UIntRange{*left, *right};
+    }
+
+    auto value = parse_uint_value(s, bit_width, error);
+    if (!value) {
+        return std::nullopt;
+    }
+    return UIntRange{*value, *value};
+}
+
+std::optional<std::vector<UIntRange>> parse_uint_ranges(std::string_view raw,
+                                                        size_t bit_width,
+                                                        std::string& error) {
+    return parse_range_list<UIntRange>(
+        raw,
+        error,
+        [bit_width](std::string_view item, std::string& item_error) -> std::optional<UIntRange> {
+            return parse_uint_range(item, bit_width, item_error);
+        });
+}
 
 std::optional<IPv4Range> parse_ipv4_range(std::string_view raw, std::string& error) {
     auto s = trim_ascii_whitespace(raw);

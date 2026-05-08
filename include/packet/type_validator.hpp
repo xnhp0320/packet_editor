@@ -60,4 +60,13 @@ public:
     }
 };
 
+template <size_t N>
+requires (N >= 1 && N <= 64)
+class BitRangeListValidator : public TypeValidator {
+public:
+    std::optional<std::string> validate(const ValueType& value) const override {
+        return validate_bit_range_value(value, N);
+    }
+};
+
 } // namespace packet

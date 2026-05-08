@@ -28,6 +28,11 @@ PacketConstructorBuilder::Result build(std::string_view input) {
     return builder.build(parse_packet(input));
 }
 
+PacketConstructorBuilder::Result build(std::string_view input, const Registry& registry) {
+    PacketConstructorBuilder builder{registry};
+    return builder.build(parse_packet(input));
+}
+
 const FieldConstructor& field(const HeaderConstructor& header, std::string_view name) {
     auto it = std::ranges::find_if(header.fields, [name](const FieldConstructor& field) {
         return field.name == name;
@@ -158,4 +163,64 @@ TEST(PacketConstructorTest, BitWidthOverflowFails) {
     EXPECT_FALSE(result.ok);
     ASSERT_EQ(result.errors.size(), 1);
     EXPECT_NE(result.errors[0].find("16 bits"), std::string::npos);
+}
+
+TEST(PacketConstructorTest, BitRangesDefaultToScalarZero) {
+    Registry registry;
+    registry.register_header("MyHdr", {{"field", "b16_ranges"}});
+
+    auto result = build("MyHdr()", registry);
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+    ASSERT_EQ(result.packet->size(), 1);
+
+    const auto& constructed = field((*result.packet)[0], "field");
+    EXPECT_EQ(std::get<uint64_t>(constructed.value), 0);
+    EXPECT_FALSE(constructed.explicitly_set);
+}
+
+TEST(PacketConstructorTest, BitRangesPreserveScalarSyntaxAsUInt64) {
+    Registry registry;
+    registry.register_header("MyHdr", {
+        {"unquoted", "b16_ranges"},
+        {"quoted", "b16_ranges"},
+    });
+
+    auto result = build(R"(MyHdr(unquoted=1,quoted="2"))", registry);
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+
+    const auto& header = (*result.packet)[0];
+    EXPECT_EQ(std::get<uint64_t>(field(header, "unquoted").value), 1);
+    EXPECT_EQ(std::get<uint64_t>(field(header, "quoted").value), 2);
+    EXPECT_TRUE(field(header, "unquoted").explicitly_set);
+    EXPECT_TRUE(field(header, "quoted").explicitly_set);
+}
+
+TEST(PacketConstructorTest, BitRangesNormalizeRangeSyntax) {
+    Registry registry;
+    registry.register_header("MyHdr", {
+        {"range", "b16_ranges"},
+        {"list", "b16_ranges"},
+    });
+
+    auto result = build(R"(MyHdr(range="1-2",list="[1, 2-3]"))", registry);
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+
+    const auto& header = (*result.packet)[0];
+    const auto& range = std::get<std::vector<UIntRange>>(field(header, "range").value);
+    ASSERT_EQ(range.size(), 1);
+    EXPECT_EQ(range[0].first, 1);
+    EXPECT_EQ(range[0].last, 2);
+
+    const auto& list = std::get<std::vector<UIntRange>>(field(header, "list").value);
+    ASSERT_EQ(list.size(), 2);
+    EXPECT_EQ(list[0].first, 1);
+    EXPECT_EQ(list[0].last, 1);
+    EXPECT_EQ(list[1].first, 2);
+    EXPECT_EQ(list[1].last, 3);
 }

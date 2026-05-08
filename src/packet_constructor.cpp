@@ -23,6 +23,35 @@ std::optional<ConstructorValue> construct_value(const FieldSpec& field,
     }
 
     const auto type = std::string_view{*field.type_name};
+    if (auto range_bit_width = bit_range_width_for_type_name(type)) {
+        if (std::holds_alternative<int64_t>(value)) {
+            if (auto bit_error = validate_bit_value(value, *range_bit_width)) {
+                error = *bit_error;
+                return std::nullopt;
+            }
+            return ConstructorValue{static_cast<uint64_t>(std::get<int64_t>(value))};
+        }
+        if (!std::holds_alternative<std::string>(value)) {
+            error = "expected integer or string value";
+            return std::nullopt;
+        }
+
+        const auto raw = trim_ascii_whitespace(std::get<std::string>(value));
+        if (raw.starts_with('[') || raw.ends_with(']') || raw.find('-') != std::string_view::npos) {
+            auto ranges = parse_uint_ranges(raw, *range_bit_width, error);
+            if (!ranges) {
+                return std::nullopt;
+            }
+            return ConstructorValue{*ranges};
+        }
+
+        auto scalar = parse_uint_value(raw, *range_bit_width, error);
+        if (!scalar) {
+            return std::nullopt;
+        }
+        return ConstructorValue{*scalar};
+    }
+
     if (type.starts_with('b')) {
         if (!std::holds_alternative<int64_t>(value)) {
             error = "expected integer value";

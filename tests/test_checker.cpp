@@ -541,6 +541,113 @@ TEST(CheckerTest, BitFieldB20Overflow) {
     EXPECT_TRUE(result.errors[0].find("20") != std::string::npos);
 }
 
+TEST(CheckerTest, BitRangeListAcceptsScalarInteger) {
+    Parser parser("MyHdr(field=65535)");
+    auto pkt = parser.parse_packet();
+    ASSERT_TRUE(pkt.has_value());
+
+    Registry registry;
+    Checker checker{registry};
+    registry.register_header("MyHdr", {{"field", "b16_ranges"}});
+
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, BitRangeListAcceptsScalarString) {
+    Parser parser(R"(MyHdr(field="65535"))");
+    auto pkt = parser.parse_packet();
+    ASSERT_TRUE(pkt.has_value());
+
+    Registry registry;
+    Checker checker{registry};
+    registry.register_header("MyHdr", {{"field", "b16_ranges"}});
+
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, BitRangeListAcceptsRangeAndList) {
+    Parser parser(R"(MyHdr(a="1-2",b="[1,2]",c="[1-2, 3-4]"))");
+    auto pkt = parser.parse_packet();
+    ASSERT_TRUE(pkt.has_value());
+
+    Registry registry;
+    Checker checker{registry};
+    registry.register_header("MyHdr", {
+        {"a", "b16_ranges"},
+        {"b", "b16_ranges"},
+        {"c", "b16_ranges"},
+    });
+
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(CheckerTest, BitRangeListRejectsOutOfWidthValue) {
+    Parser parser(R"(MyHdr(field="65536"))");
+    auto pkt = parser.parse_packet();
+    ASSERT_TRUE(pkt.has_value());
+
+    Registry registry;
+    Checker checker{registry};
+    registry.register_header("MyHdr", {{"field", "b16_ranges"}});
+
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.errors.size(), 1);
+    EXPECT_NE(result.errors[0].find("16 bits"), std::string::npos);
+}
+
+TEST(CheckerTest, BitRangeListRejectsNegativeValue) {
+    Parser parser("MyHdr(field=-1)");
+    auto pkt = parser.parse_packet();
+    ASSERT_TRUE(pkt.has_value());
+
+    Registry registry;
+    Checker checker{registry};
+    registry.register_header("MyHdr", {{"field", "b16_ranges"}});
+
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.errors.size(), 1);
+}
+
+TEST(CheckerTest, BitRangeListRejectsReversedRange) {
+    Parser parser(R"(MyHdr(field="2-1"))");
+    auto pkt = parser.parse_packet();
+    ASSERT_TRUE(pkt.has_value());
+
+    Registry registry;
+    Checker checker{registry};
+    registry.register_header("MyHdr", {{"field", "b16_ranges"}});
+
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.errors.size(), 1);
+    EXPECT_NE(result.errors[0].find("greater"), std::string::npos);
+}
+
+TEST(CheckerTest, BitRangeListRejectsMalformedLists) {
+    Registry registry;
+    Checker checker{registry};
+    registry.register_header("MyHdr", {
+        {"empty", "b16_ranges"},
+        {"trailing", "b16_ranges"},
+    });
+
+    Parser parser(R"(MyHdr(empty="[]",trailing="[1,]"))");
+    auto pkt = parser.parse_packet();
+    ASSERT_TRUE(pkt.has_value());
+
+    auto result = checker.check(*pkt);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.errors.size(), 2);
+}
+
 TEST(CheckerTest, IPv4SingleAddressInRangeType) {
     Parser parser(R"(IP(src="192.168.1.1",dst="10.0.0.1"))");
     auto pkt = parser.parse_packet();

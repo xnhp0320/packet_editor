@@ -10,8 +10,10 @@ namespace {
 
 template <size_t... Is>
 void register_bit_types(Registry& registry, std::index_sequence<Is...>) {
-    (registry.register_type(std::format("b{}", Is + 1),
-                            std::make_unique<BitsValidator<Is + 1>>()), ...);
+    ((registry.register_type(std::format("b{}", Is + 1),
+                             std::make_unique<BitsValidator<Is + 1>>())
+              .register_type(std::format("b{}_ranges", Is + 1),
+                             std::make_unique<BitRangeListValidator<Is + 1>>())), ...);
 }
 
 } // namespace

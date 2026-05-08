@@ -71,6 +71,13 @@ struct IPv6Range {
     auto operator<=>(const IPv6Range&) const = default;
 };
 
+struct UIntRange {
+    uint64_t first;
+    uint64_t last;
+
+    auto operator<=>(const UIntRange&) const = default;
+};
+
 using ConstructorValue = std::variant<
     uint64_t,
     MacAddr,
@@ -79,6 +86,7 @@ using ConstructorValue = std::variant<
     IPv4Range,
     IPv6Range,
     std::vector<IPv4Range>,
-    std::vector<IPv6Range>>;
+    std::vector<IPv6Range>,
+    std::vector<UIntRange>>;
 
 } // namespace packet
