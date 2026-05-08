@@ -157,6 +157,9 @@ if(PACKET_BUILD_DPDK)
     add_executable(packet_dpdk_init apps/dpdk_init.cpp)
     target_link_libraries(packet_dpdk_init PRIVATE packet_runtime)
 
+    add_executable(packet_tap_runtime apps/dpdk_init.cpp)
+    target_link_libraries(packet_tap_runtime PRIVATE packet_runtime)
+
     add_executable(test_runtime tests/test_runtime.cpp)
     target_link_libraries(test_runtime packet_runtime gtest_main)
 endif()

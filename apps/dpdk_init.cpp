@@ -50,13 +50,16 @@ int main(int argc, char** argv) {
     }
 
     packet::Runtime runtime;
-    auto result = runtime.init(*program, argv[0]);
+    auto result = runtime.run(*program, argv[0]);
     print_messages(result);
     if (!result.ok) {
         return 1;
     }
 
-    std::cout << "DPDK initialized; rte_eal_init parsed "
-              << result.eal_parsed_args << " argument(s)\n";
+    std::cout << "DPDK runtime completed; rte_eal_init parsed "
+              << result.eal_parsed_args << " argument(s), port "
+              << result.port_id << " sent " << result.tx_sent << '/'
+              << result.tx_attempted << " packet(s), packet_len "
+              << result.packet_len << " bytes\n";
     return 0;
 }

@@ -4,6 +4,8 @@
 #include "packet/checker.hpp"
 #include "packet/registry.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -18,6 +20,10 @@ public:
         std::vector<std::string> warnings;
         std::vector<std::string> errors;
         int eal_parsed_args = 0;
+        uint16_t port_id = 0;
+        size_t packet_len = 0;
+        uint16_t tx_attempted = 0;
+        uint16_t tx_sent = 0;
     };
 
     Runtime();
@@ -25,6 +31,7 @@ public:
 
     Result check(const Program& program) const;
     Result init(const Program& program, std::string_view eal_program_name = "packet_editor");
+    Result run(const Program& program, std::string_view eal_program_name = "packet_editor");
 
 private:
     struct Config {

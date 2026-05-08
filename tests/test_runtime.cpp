@@ -1,12 +1,18 @@
 #include "packet/dpdk_offload.hpp"
+#include "packet/packet_constructor.hpp"
+#include "packet/packet_serializer.hpp"
 #include "packet/parser.hpp"
+#include "packet/registry.hpp"
 #include "packet/runtime.hpp"
 
 #include <gtest/gtest.h>
 
 #include <rte_mbuf.h>
 
+#include <cstddef>
 #include <string>
+#include <variant>
+#include <vector>
 
 using namespace packet;
 
@@ -19,6 +25,9 @@ Program parse_program(std::string_view input) {
     return std::move(*program);
 }
 
+constexpr std::string_view tap_runtime_program = R"(DPDK_ARGS: "--no-huge --no-pci -l 0"
+PACKET: Ether(dst="ff:ff:ff:ff:ff:ff",src="02:64:74:61:70:00",type=2048)/IP(src="192.168.0.1",dst="192.168.0.2",ttl=64,proto=17)/UDP(sport=1234,dport=5678))";
+
 } // namespace
 
 TEST(RuntimeTest, ValidMandatoryVariables) {
@@ -30,6 +39,34 @@ PACKET: Ether()/IP(src="192.168.0.1"))");
 
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(RuntimeTest, ValidTapRuntimeProgram) {
+    auto program = parse_program(tap_runtime_program);
+
+    Runtime runtime;
+    auto result = runtime.check(program);
+
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
+TEST(RuntimeTest, TapRuntimePacketSerializesAndFixesUp) {
+    auto program = parse_program(tap_runtime_program);
+    Registry registry;
+    PacketConstructorBuilder builder{registry};
+    auto constructor = builder.build(std::get<Packet>(evaluate(program.variables[1].expression)));
+    ASSERT_TRUE(constructor.ok);
+    ASSERT_TRUE(constructor.packet.has_value());
+
+    std::vector<std::byte> payload(2048);
+    auto serialized = serialize_packet(*constructor.packet, registry, PacketBufferView{payload});
+    ASSERT_TRUE(serialized.ok);
+    EXPECT_EQ(serialized.packet_len, 42);
+
+    auto fixed = fixup_packet(*constructor.packet, registry, PacketBufferView{payload}, serialized.packet_len);
+    EXPECT_TRUE(fixed.ok);
+    EXPECT_TRUE(fixed.errors.empty());
 }
 
 TEST(RuntimeTest, MissingPacket) {
