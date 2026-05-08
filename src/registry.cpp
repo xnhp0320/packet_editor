@@ -46,9 +46,9 @@ Registry::Registry() {
         {"frag",    "b13"},
         {"ttl",     "b8", ConstructorValue{uint64_t{64}}},
         {"proto",   "b8"},
+        {"chksum",  "b16"},
         {"src",     "ipv4_ranges"},
         {"dst",     "ipv4_ranges"},
-        {"chksum",  "b16"},
     });
 
     register_header("IPv6", {

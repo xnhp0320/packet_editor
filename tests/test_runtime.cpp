@@ -1,7 +1,10 @@
+#include "packet/dpdk_offload.hpp"
 #include "packet/parser.hpp"
 #include "packet/runtime.hpp"
 
 #include <gtest/gtest.h>
+
+#include <rte_mbuf.h>
 
 #include <string>
 
@@ -74,4 +77,24 @@ PACKET: BadHeader())");
     EXPECT_FALSE(result.ok);
     ASSERT_EQ(result.errors.size(), 1);
     EXPECT_EQ(result.errors[0], "unknown header: 'BadHeader'");
+}
+
+TEST(RuntimeTest, AppliesDpdkOffloadRequestToMbufMetadata) {
+    rte_mbuf mbuf{};
+    PacketOffloadRequest request;
+    request.layer3 = OffloadLayer3::IPv4;
+    request.ipv4_checksum = true;
+    request.udp_checksum = true;
+    request.l2_len = 14;
+    request.l3_len = 20;
+    request.l4_len = 8;
+
+    apply_dpdk_offload_request(mbuf, request);
+
+    EXPECT_TRUE((mbuf.ol_flags & RTE_MBUF_F_TX_IPV4) != 0);
+    EXPECT_TRUE((mbuf.ol_flags & RTE_MBUF_F_TX_IP_CKSUM) != 0);
+    EXPECT_EQ(mbuf.ol_flags & RTE_MBUF_F_TX_L4_MASK, RTE_MBUF_F_TX_UDP_CKSUM);
+    EXPECT_EQ(mbuf.l2_len, 14);
+    EXPECT_EQ(mbuf.l3_len, 20);
+    EXPECT_EQ(mbuf.l4_len, 8);
 }

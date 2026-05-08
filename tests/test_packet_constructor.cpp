@@ -79,8 +79,9 @@ TEST(PacketConstructorTest, UserValuesOverrideDefaultsAndKeepRegistryOrder) {
     EXPECT_EQ(ip.fields[0].name, "version");
     EXPECT_EQ(ip.fields[1].name, "ihl");
     EXPECT_EQ(ip.fields[8].name, "proto");
-    EXPECT_EQ(ip.fields[9].name, "src");
-    EXPECT_EQ(ip.fields[10].name, "dst");
+    EXPECT_EQ(ip.fields[9].name, "chksum");
+    EXPECT_EQ(ip.fields[10].name, "src");
+    EXPECT_EQ(ip.fields[11].name, "dst");
 
     EXPECT_EQ(std::get<uint64_t>(field(ip, "ttl").value), 32);
     EXPECT_TRUE(field(ip, "ttl").explicitly_set);

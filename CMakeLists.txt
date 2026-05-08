@@ -138,6 +138,7 @@ add_library(packet
     src/parser.cpp
     src/checker.cpp
     src/packet_constructor.cpp
+    src/packet_serializer.cpp
     src/registry.cpp
     src/type_validator.cpp
     src/util.cpp
@@ -148,6 +149,7 @@ target_include_directories(packet PUBLIC include)
 
 if(PACKET_BUILD_DPDK)
     add_library(packet_runtime
+        src/dpdk_offload.cpp
         src/runtime.cpp
     )
     target_link_libraries(packet_runtime PUBLIC packet DPDK::dpdk)
@@ -171,11 +173,15 @@ target_link_libraries(test_checker packet gtest_main)
 add_executable(test_packet_constructor tests/test_packet_constructor.cpp)
 target_link_libraries(test_packet_constructor packet gtest_main)
 
+add_executable(test_packet_serializer tests/test_packet_serializer.cpp)
+target_link_libraries(test_packet_serializer packet gtest_main)
+
 enable_testing()
 add_test(NAME LexerTest  COMMAND test_lexer)
 add_test(NAME ParserTest COMMAND test_parser)
 add_test(NAME CheckerTest COMMAND test_checker)
 add_test(NAME PacketConstructorTest COMMAND test_packet_constructor)
+add_test(NAME PacketSerializerTest COMMAND test_packet_serializer)
 if(PACKET_BUILD_DPDK)
     add_test(NAME RuntimeTest COMMAND test_runtime)
 endif()
