@@ -1,8 +1,10 @@
 #include "packet/packet_serializer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <format>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -43,18 +45,6 @@ const FieldSpec* find_field_spec(const HeaderSpec& header, std::string_view name
     return it == header.fields.end() ? nullptr : &*it;
 }
 
-bool is_scalar(const IPv4Range& range) {
-    return range.first == range.last;
-}
-
-bool is_scalar(const IPv6Range& range) {
-    return range.first == range.last;
-}
-
-bool is_scalar(const UIntRange& range) {
-    return range.first == range.last;
-}
-
 void write_bit(std::span<std::byte> payload, size_t bit_offset, bool bit) {
     auto& byte = payload[bit_offset / 8];
     const auto mask = static_cast<uint8_t>(1u << (7 - bit_offset % 8));
@@ -74,6 +64,122 @@ void write_bytes(std::span<std::byte> payload, size_t bit_offset, std::span<cons
     for (size_t index = 0; index < bytes.size(); ++index) {
         write_bits(payload, bit_offset + index * 8, 8, bytes[index]);
     }
+}
+
+std::array<uint8_t, 4> ipv4_bytes(const IPv4& ip) {
+    std::array<uint8_t, 4> bytes;
+    std::ranges::copy(ip.bytes(), bytes.begin());
+    return bytes;
+}
+
+uint32_t ipv4_to_u32(const IPv4& ip) {
+    const auto bytes = ipv4_bytes(ip);
+    return (static_cast<uint32_t>(bytes[0]) << 24) |
+           (static_cast<uint32_t>(bytes[1]) << 16) |
+           (static_cast<uint32_t>(bytes[2]) << 8) |
+           static_cast<uint32_t>(bytes[3]);
+}
+
+IPv4 ipv4_from_u32(uint32_t value) {
+    return IPv4::from_bytes({
+        static_cast<uint8_t>(value >> 24),
+        static_cast<uint8_t>((value >> 16) & 0xff),
+        static_cast<uint8_t>((value >> 8) & 0xff),
+        static_cast<uint8_t>(value & 0xff),
+    });
+}
+
+std::array<uint8_t, 16> ipv6_bytes(const IPv6& ip) {
+    std::array<uint8_t, 16> bytes;
+    std::ranges::copy(ip.bytes(), bytes.begin());
+    return bytes;
+}
+
+IPv6 add_ipv6_offset(const IPv6& ip, uint64_t offset) {
+    auto bytes = ipv6_bytes(ip);
+    uint16_t carry = 0;
+    for (size_t index = bytes.size(); index > 0; --index) {
+        const auto shift = (bytes.size() - index) * 8;
+        const auto addend = shift < 64 ? static_cast<uint16_t>((offset >> shift) & 0xff) : uint16_t{0};
+        const auto sum = static_cast<uint16_t>(bytes[index - 1]) + addend + carry;
+        bytes[index - 1] = static_cast<uint8_t>(sum & 0xff);
+        carry = static_cast<uint16_t>(sum >> 8);
+    }
+    return IPv6::from_bytes(bytes);
+}
+
+uint64_t saturated_add_count(uint64_t left, uint64_t right) {
+    const auto max = std::numeric_limits<uint64_t>::max();
+    return max - left < right ? max : left + right;
+}
+
+uint64_t uint_range_count(const UIntRange& range) {
+    return range.last - range.first == std::numeric_limits<uint64_t>::max()
+        ? std::numeric_limits<uint64_t>::max()
+        : range.last - range.first + 1;
+}
+
+uint64_t ipv4_range_count(const IPv4Range& range) {
+    return static_cast<uint64_t>(ipv4_to_u32(range.last) - ipv4_to_u32(range.first)) + 1;
+}
+
+uint64_t ipv6_range_count(const IPv6Range& range) {
+    const auto first = ipv6_bytes(range.first);
+    const auto last = ipv6_bytes(range.last);
+    std::array<uint8_t, 16> diff{};
+    uint16_t borrow = 0;
+    for (size_t index = first.size(); index > 0; --index) {
+        const auto minuend = static_cast<uint16_t>(last[index - 1]);
+        const auto subtrahend = static_cast<uint16_t>(first[index - 1]) + borrow;
+        if (minuend < subtrahend) {
+            diff[index - 1] = static_cast<uint8_t>(minuend + 256 - subtrahend);
+            borrow = 1;
+        } else {
+            diff[index - 1] = static_cast<uint8_t>(minuend - subtrahend);
+            borrow = 0;
+        }
+    }
+
+    if (std::ranges::any_of(diff.begin(), diff.begin() + 8, [](uint8_t byte) { return byte != 0; })) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+
+    uint64_t value = 0;
+    for (size_t index = 8; index < diff.size(); ++index) {
+        value = (value << 8) | diff[index];
+    }
+    return value == std::numeric_limits<uint64_t>::max()
+        ? std::numeric_limits<uint64_t>::max()
+        : value + 1;
+}
+
+template <typename Range, typename Count>
+uint64_t total_value_count(const std::vector<Range>& ranges, Count count) {
+    uint64_t total = 0;
+    for (const auto& range : ranges) {
+        total = saturated_add_count(total, count(range));
+    }
+    return total;
+}
+
+template <typename Range>
+struct IndexedRange {
+    Range range;
+    uint64_t offset = 0;
+};
+
+template <typename Range, typename Count>
+std::optional<IndexedRange<Range>> range_at_index(const std::vector<Range>& ranges,
+                                                  uint64_t value_index,
+                                                  Count count) {
+    for (const auto& range : ranges) {
+        const auto range_count = count(range);
+        if (value_index < range_count) {
+            return IndexedRange<Range>{range, value_index};
+        }
+        value_index -= range_count;
+    }
+    return std::nullopt;
 }
 
 void write_u16(std::span<std::byte> payload, size_t offset, uint16_t value) {
@@ -143,66 +249,120 @@ uint32_t ipv6_pseudo_sum(std::span<const std::byte> payload,
     return sum;
 }
 
-std::optional<uint64_t> scalar_integer_value(const ConstructorValue& value,
-                                             std::string_view field_name,
-                                             std::string& error) {
+std::optional<uint64_t> first_integer_value(const ConstructorValue& value,
+                                            std::string_view field_name,
+                                            std::string& error) {
     if (std::holds_alternative<uint64_t>(value)) {
         return std::get<uint64_t>(value);
     }
     if (std::holds_alternative<std::vector<UIntRange>>(value)) {
         const auto& ranges = std::get<std::vector<UIntRange>>(value);
-        if (ranges.size() == 1 && is_scalar(ranges.front())) {
+        if (!ranges.empty()) {
             return ranges.front().first;
         }
+        error = std::format("field '{}' has an empty integer range list", field_name);
+        return std::nullopt;
     }
 
-    error = std::format("field '{}' has a non-scalar integer range value", field_name);
+    error = std::format("field '{}' is not an integer value", field_name);
     return std::nullopt;
 }
 
-std::optional<IPv4> scalar_ipv4_value(const ConstructorValue& value,
-                                      std::string_view field_name,
-                                      std::string& error) {
+std::optional<IPv4> first_ipv4_value(const ConstructorValue& value,
+                                     std::string_view field_name,
+                                     std::string& error) {
     if (std::holds_alternative<IPv4>(value)) {
         return std::get<IPv4>(value);
     }
     if (std::holds_alternative<IPv4Range>(value)) {
-        const auto& range = std::get<IPv4Range>(value);
-        if (is_scalar(range)) {
-            return range.first;
-        }
+        return std::get<IPv4Range>(value).first;
     }
     if (std::holds_alternative<std::vector<IPv4Range>>(value)) {
         const auto& ranges = std::get<std::vector<IPv4Range>>(value);
-        if (ranges.size() == 1 && is_scalar(ranges.front())) {
+        if (!ranges.empty()) {
             return ranges.front().first;
         }
+        error = std::format("field '{}' has an empty ipv4 range list", field_name);
+        return std::nullopt;
     }
 
-    error = std::format("field '{}' has a non-scalar ipv4 range value", field_name);
+    error = std::format("field '{}' is not an ipv4 value", field_name);
     return std::nullopt;
 }
 
-std::optional<IPv6> scalar_ipv6_value(const ConstructorValue& value,
-                                      std::string_view field_name,
-                                      std::string& error) {
+std::optional<IPv6> first_ipv6_value(const ConstructorValue& value,
+                                     std::string_view field_name,
+                                     std::string& error) {
     if (std::holds_alternative<IPv6>(value)) {
         return std::get<IPv6>(value);
     }
     if (std::holds_alternative<IPv6Range>(value)) {
-        const auto& range = std::get<IPv6Range>(value);
-        if (is_scalar(range)) {
-            return range.first;
-        }
+        return std::get<IPv6Range>(value).first;
     }
     if (std::holds_alternative<std::vector<IPv6Range>>(value)) {
         const auto& ranges = std::get<std::vector<IPv6Range>>(value);
-        if (ranges.size() == 1 && is_scalar(ranges.front())) {
+        if (!ranges.empty()) {
             return ranges.front().first;
         }
+        error = std::format("field '{}' has an empty ipv6 range list", field_name);
+        return std::nullopt;
     }
 
-    error = std::format("field '{}' has a non-scalar ipv6 range value", field_name);
+    error = std::format("field '{}' is not an ipv6 value", field_name);
+    return std::nullopt;
+}
+
+std::optional<PayloadFieldModifier> make_modifier(const HeaderConstructor& header,
+                                                  const FieldSpec& spec,
+                                                  const FieldConstructor& field,
+                                                  size_t bit_offset,
+                                                  std::vector<std::string>& errors) {
+    PayloadFieldModifier modifier;
+    modifier.protocol = header.protocol;
+    modifier.field = field.name;
+    modifier.bit_offset = bit_offset;
+    modifier.bit_width = spec.bit_width;
+
+    if (std::holds_alternative<IPv4Range>(field.value)) {
+        modifier.values = std::vector<IPv4Range>{std::get<IPv4Range>(field.value)};
+        modifier.value_count = ipv4_range_count(std::get<IPv4Range>(field.value));
+        return modifier;
+    }
+    if (std::holds_alternative<IPv6Range>(field.value)) {
+        modifier.values = std::vector<IPv6Range>{std::get<IPv6Range>(field.value)};
+        modifier.value_count = ipv6_range_count(std::get<IPv6Range>(field.value));
+        return modifier;
+    }
+    if (std::holds_alternative<std::vector<UIntRange>>(field.value)) {
+        const auto& ranges = std::get<std::vector<UIntRange>>(field.value);
+        if (ranges.empty()) {
+            errors.push_back(std::format("field '{}' has an empty integer range list", field.name));
+            return std::nullopt;
+        }
+        modifier.values = ranges;
+        modifier.value_count = total_value_count(ranges, uint_range_count);
+        return modifier;
+    }
+    if (std::holds_alternative<std::vector<IPv4Range>>(field.value)) {
+        const auto& ranges = std::get<std::vector<IPv4Range>>(field.value);
+        if (ranges.empty()) {
+            errors.push_back(std::format("field '{}' has an empty ipv4 range list", field.name));
+            return std::nullopt;
+        }
+        modifier.values = ranges;
+        modifier.value_count = total_value_count(ranges, ipv4_range_count);
+        return modifier;
+    }
+    if (std::holds_alternative<std::vector<IPv6Range>>(field.value)) {
+        const auto& ranges = std::get<std::vector<IPv6Range>>(field.value);
+        if (ranges.empty()) {
+            errors.push_back(std::format("field '{}' has an empty ipv6 range list", field.name));
+            return std::nullopt;
+        }
+        modifier.values = ranges;
+        modifier.value_count = total_value_count(ranges, ipv6_range_count);
+        return modifier;
+    }
     return std::nullopt;
 }
 
@@ -222,7 +382,7 @@ bool serialize_field(const FieldSpec& spec,
         return true;
     }
     if (type == "ipv4" || type == "ipv4_range" || type == "ipv4_ranges") {
-        auto ip = scalar_ipv4_value(field.value, field.name, error);
+        auto ip = first_ipv4_value(field.value, field.name, error);
         if (!ip) {
             errors.push_back(std::move(error));
             return false;
@@ -231,7 +391,7 @@ bool serialize_field(const FieldSpec& spec,
         return true;
     }
     if (type == "ipv6" || type == "ipv6_range" || type == "ipv6_ranges") {
-        auto ip = scalar_ipv6_value(field.value, field.name, error);
+        auto ip = first_ipv6_value(field.value, field.name, error);
         if (!ip) {
             errors.push_back(std::move(error));
             return false;
@@ -240,7 +400,7 @@ bool serialize_field(const FieldSpec& spec,
         return true;
     }
 
-    auto integer = scalar_integer_value(field.value, field.name, error);
+    auto integer = first_integer_value(field.value, field.name, error);
     if (!integer) {
         errors.push_back(std::move(error));
         return false;
@@ -282,6 +442,58 @@ void set_l4_lengths(PacketOffloadRequest& request,
 
 } // namespace
 
+bool PayloadFieldModifier::apply(std::span<std::byte> payload,
+                                 uint64_t value_index,
+                                 std::string& error) const {
+    if (bit_width > std::numeric_limits<size_t>::max() - bit_offset ||
+        (bit_offset + bit_width + 7) / 8 > payload.size()) {
+        error = std::format("payload is too small for modifier '{}.{}'", protocol, field);
+        return false;
+    }
+
+    if (std::holds_alternative<std::vector<UIntRange>>(values)) {
+        const auto& ranges = std::get<std::vector<UIntRange>>(values);
+        auto range = range_at_index(ranges, value_index, uint_range_count);
+        if (!range) {
+            error = std::format("value index {} is out of range for modifier '{}.{}'",
+                                value_index,
+                                protocol,
+                                field);
+            return false;
+        }
+        write_bits(payload, bit_offset, bit_width, range->range.first + range->offset);
+        return true;
+    }
+
+    if (std::holds_alternative<std::vector<IPv4Range>>(values)) {
+        const auto& ranges = std::get<std::vector<IPv4Range>>(values);
+        auto range = range_at_index(ranges, value_index, ipv4_range_count);
+        if (!range) {
+            error = std::format("value index {} is out of range for modifier '{}.{}'",
+                                value_index,
+                                protocol,
+                                field);
+            return false;
+        }
+        const auto ip = ipv4_from_u32(ipv4_to_u32(range->range.first) + static_cast<uint32_t>(range->offset));
+        write_bytes(payload, bit_offset, ip.bytes());
+        return true;
+    }
+
+    const auto& ranges = std::get<std::vector<IPv6Range>>(values);
+    auto range = range_at_index(ranges, value_index, ipv6_range_count);
+    if (!range) {
+        error = std::format("value index {} is out of range for modifier '{}.{}'",
+                            value_index,
+                            protocol,
+                            field);
+        return false;
+    }
+    const auto ip = add_ipv6_offset(range->range.first, range->offset);
+    write_bytes(payload, bit_offset, ip.bytes());
+    return true;
+}
+
 SerializeResult serialize_packet(const PacketConstructor& packet,
                                  const Registry& registry,
                                  PacketBufferView output) {
@@ -316,7 +528,11 @@ SerializeResult serialize_packet(const PacketConstructor& packet,
             }
 
             const auto bit_offset = header.offset * 8 + spec->bit_offset;
-            serialize_field(*spec, field, bit_offset, output.payload, result.errors);
+            if (serialize_field(*spec, field, bit_offset, output.payload, result.errors)) {
+                if (auto modifier = make_modifier(header, *spec, field, bit_offset, result.errors)) {
+                    result.modifiers.push_back(std::move(*modifier));
+                }
+            }
         }
     }
 

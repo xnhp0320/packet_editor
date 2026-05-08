@@ -4,8 +4,10 @@
 #include "packet/registry.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace packet {
@@ -14,10 +16,28 @@ struct PacketBufferView {
     std::span<std::byte> payload;
 };
 
+class PayloadFieldModifier {
+public:
+    using RangeValues = std::variant<
+        std::vector<UIntRange>,
+        std::vector<IPv4Range>,
+        std::vector<IPv6Range>>;
+
+    std::string protocol;
+    std::string field;
+    size_t bit_offset = 0;
+    size_t bit_width = 0;
+    uint64_t value_count = 0;
+    RangeValues values;
+
+    bool apply(std::span<std::byte> payload, uint64_t value_index, std::string& error) const;
+};
+
 struct SerializeResult {
     bool ok = false;
     std::vector<std::string> errors;
     size_t packet_len = 0;
+    std::vector<PayloadFieldModifier> modifiers;
 };
 
 enum class FixupMode {

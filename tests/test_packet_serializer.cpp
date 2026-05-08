@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -25,8 +26,7 @@ Packet parse_packet(std::string_view input) {
     return std::move(*packet);
 }
 
-PacketConstructor build_constructor(std::string_view input) {
-    Registry registry;
+PacketConstructor build_constructor(std::string_view input, const Registry& registry) {
     PacketConstructorBuilder builder{registry};
     auto result = builder.build(parse_packet(input));
     EXPECT_TRUE(result.ok);
@@ -34,9 +34,23 @@ PacketConstructor build_constructor(std::string_view input) {
     return std::move(*result.packet);
 }
 
+PacketConstructor build_constructor(std::string_view input) {
+    Registry registry;
+    return build_constructor(input, registry);
+}
+
 SerializeResult serialize_into(const PacketConstructor& packet, std::vector<std::byte>& storage) {
     Registry registry;
     return serialize_packet(packet, registry, PacketBufferView{storage});
+}
+
+const PayloadFieldModifier* find_modifier(const SerializeResult& result,
+                                          std::string_view protocol,
+                                          std::string_view field) {
+    auto it = std::ranges::find_if(result.modifiers, [protocol, field](const PayloadFieldModifier& modifier) {
+        return modifier.protocol == protocol && modifier.field == field;
+    });
+    return it == result.modifiers.end() ? nullptr : &*it;
 }
 
 uint8_t byte_at(std::span<const std::byte> bytes, size_t offset) {
@@ -132,15 +146,110 @@ TEST(PacketSerializerTest, RejectsSmallOutputBuffer) {
     EXPECT_NE(result.errors[0].find("packet requires 42 bytes"), std::string::npos);
 }
 
-TEST(PacketSerializerTest, RejectsMultiValueRangesForSinglePacketSerialization) {
-    auto packet = build_constructor(R"(IP(src="[10.0.0.1, 10.0.0.2]"))");
+TEST(PacketSerializerTest, SerializesFirstRangeValueIntoBasePayload) {
+    auto packet = build_constructor(R"(IP(src="[10.0.0.2-10.0.0.4]",dst="10.0.1.1-10.0.1.2"))");
     std::vector<std::byte> payload(20);
 
     auto result = serialize_into(packet, payload);
 
-    EXPECT_FALSE(result.ok);
-    ASSERT_EQ(result.errors.size(), 1);
-    EXPECT_NE(result.errors[0].find("non-scalar ipv4 range value"), std::string::npos);
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(byte_at(payload, 12), 10);
+    EXPECT_EQ(byte_at(payload, 15), 2);
+    EXPECT_EQ(byte_at(payload, 16), 10);
+    EXPECT_EQ(byte_at(payload, 19), 1);
+    auto* src_modifier = find_modifier(result, "IP", "src");
+    ASSERT_NE(src_modifier, nullptr);
+    EXPECT_EQ(src_modifier->value_count, 3);
+    auto* dst_modifier = find_modifier(result, "IP", "dst");
+    ASSERT_NE(dst_modifier, nullptr);
+    EXPECT_EQ(dst_modifier->value_count, 2);
+}
+
+TEST(PacketSerializerTest, SerializesFirstIPv6RangeValueIntoBasePayload) {
+    auto packet = build_constructor(R"(IPv6(src="[2001:db8::2-2001:db8::4]"))");
+    std::vector<std::byte> payload(40);
+
+    auto result = serialize_into(packet, payload);
+
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(byte_at(payload, 8), 0x20);
+    EXPECT_EQ(byte_at(payload, 9), 0x01);
+    EXPECT_EQ(byte_at(payload, 22), 0x00);
+    EXPECT_EQ(byte_at(payload, 23), 0x02);
+    auto* modifier = find_modifier(result, "IPv6", "src");
+    ASSERT_NE(modifier, nullptr);
+    EXPECT_EQ(modifier->value_count, 3);
+}
+
+TEST(PacketSerializerTest, SerializesFirstBitRangeValueIntoBasePayload) {
+    Registry registry;
+    registry.register_header("MyHdr", {{"field", "b16_ranges"}});
+    auto packet = build_constructor(R"(MyHdr(field="[100-102]"))", registry);
+    std::vector<std::byte> payload(2);
+
+    auto result = serialize_packet(packet, registry, PacketBufferView{payload});
+
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(u16_at(payload, 0), 100);
+    auto* modifier = find_modifier(result, "MyHdr", "field");
+    ASSERT_NE(modifier, nullptr);
+    EXPECT_EQ(modifier->value_count, 3);
+}
+
+TEST(PacketSerializerTest, ModifierAppliesListIndexToPayload) {
+    auto packet = build_constructor(R"(IP(src="[10.0.0.1-10.0.0.2, 10.0.1.1-10.0.1.2]"))");
+    std::vector<std::byte> payload(20);
+
+    auto result = serialize_into(packet, payload);
+    ASSERT_TRUE(result.ok);
+    auto* modifier = find_modifier(result, "IP", "src");
+    ASSERT_NE(modifier, nullptr);
+
+    std::string error;
+    ASSERT_TRUE(modifier->apply(payload, 2, error)) << error;
+    EXPECT_EQ(byte_at(payload, 12), 10);
+    EXPECT_EQ(byte_at(payload, 13), 0);
+    EXPECT_EQ(byte_at(payload, 14), 1);
+    EXPECT_EQ(byte_at(payload, 15), 1);
+}
+
+TEST(PacketSerializerTest, ModifierRejectsOutOfRangeIndex) {
+    auto packet = build_constructor(R"(IP(src="[10.0.0.1-10.0.0.2]"))");
+    std::vector<std::byte> payload(20);
+
+    auto result = serialize_into(packet, payload);
+    ASSERT_TRUE(result.ok);
+    auto* modifier = find_modifier(result, "IP", "src");
+    ASSERT_NE(modifier, nullptr);
+
+    std::string error;
+    EXPECT_FALSE(modifier->apply(payload, 2, error));
+    EXPECT_NE(error.find("out of range"), std::string::npos);
+}
+
+TEST(PacketSerializerTest, ModifiedPayloadCanBeFixedUpAgain) {
+    auto packet = build_constructor(
+        std::format(R"(Ether(type=2048)/IP(src="[192.168.0.1-192.168.0.3]",dst="192.168.0.2",ttl=64,proto={})/UDP(sport=53,dport=54))",
+                    udp_protocol_number));
+    std::vector<std::byte> payload(64);
+    Registry registry;
+
+    auto serialize = serialize_packet(packet, registry, PacketBufferView{payload});
+    ASSERT_TRUE(serialize.ok);
+    auto* modifier = find_modifier(serialize, "IP", "src");
+    ASSERT_NE(modifier, nullptr);
+
+    std::string error;
+    ASSERT_TRUE(modifier->apply(payload, 2, error)) << error;
+    auto fixup = fixup_packet(packet, registry, PacketBufferView{payload}, serialize.packet_len);
+
+    ASSERT_TRUE(fixup.ok);
+    EXPECT_EQ(byte_at(payload, 26), 192);
+    EXPECT_EQ(byte_at(payload, 29), 3);
+    EXPECT_EQ(fold(checksum_sum(std::span<const std::byte>{payload}.subspan(14, 20))), 0xffff);
+    EXPECT_EQ(fold(ipv4_udp_pseudo_sum(payload, 14, 8) +
+                   checksum_sum(std::span<const std::byte>{payload}.subspan(34, 8))),
+              0xffff);
 }
 
 TEST(PacketSerializerTest, SoftwareFixupUpdatesLengthsAndChecksums) {
