@@ -272,6 +272,23 @@ TEST(PacketConstructorTest, BitRangesPreserveScalarSyntaxAsUInt64) {
     EXPECT_TRUE(field(header, "quoted").explicitly_set);
 }
 
+TEST(PacketConstructorTest, BitRangesParsePrefixedIntegerSyntax) {
+    Registry registry;
+    registry.register_header("MyHdr", {
+        {"unquoted", "b16_ranges"},
+        {"quoted", "b16_ranges"},
+    });
+
+    auto result = build(R"(MyHdr(unquoted=0b1010,quoted="0x10"))", registry);
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+
+    const auto& header = (*result.packet)[0];
+    EXPECT_EQ(std::get<uint64_t>(field(header, "unquoted").value), 10);
+    EXPECT_EQ(std::get<uint64_t>(field(header, "quoted").value), 16);
+}
+
 TEST(PacketConstructorTest, BitRangesNormalizeRangeSyntax) {
     Registry registry;
     registry.register_header("MyHdr", {
@@ -279,7 +296,7 @@ TEST(PacketConstructorTest, BitRangesNormalizeRangeSyntax) {
         {"list", "b16_ranges"},
     });
 
-    auto result = build(R"(MyHdr(range="1-2",list="[1, 2-3]"))", registry);
+    auto result = build(R"(MyHdr(range="0x1-0b10",list="[1, 0b10-0x3]"))", registry);
 
     ASSERT_TRUE(result.ok);
     ASSERT_TRUE(result.packet.has_value());

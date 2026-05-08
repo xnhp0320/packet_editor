@@ -599,6 +599,24 @@ TEST(CheckerTest, BitRangeListAcceptsRangeAndList) {
     EXPECT_TRUE(result.errors.empty());
 }
 
+TEST(CheckerTest, BitRangeListAcceptsHexAndBinary) {
+    Parser parser(R"(MyHdr(a=0b1010,b="0x10-0b10010",c="[0x1f, 0b100000-0x21]"))");
+    auto pkt = parser.parse_packet();
+    ASSERT_TRUE(pkt.has_value()) << parser.last_error();
+
+    Registry registry;
+    Checker checker{registry};
+    registry.register_header("MyHdr", {
+        {"a", "b16_ranges"},
+        {"b", "b16_ranges"},
+        {"c", "b16_ranges"},
+    });
+
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+}
+
 TEST(CheckerTest, BitRangeListRejectsOutOfWidthValue) {
     Parser parser(R"(MyHdr(field="65536"))");
     auto pkt = parser.parse_packet();

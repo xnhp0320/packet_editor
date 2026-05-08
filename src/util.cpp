@@ -248,10 +248,23 @@ std::optional<uint64_t> parse_uint_value(std::string_view raw, size_t bit_width,
         return std::nullopt;
     }
 
+    int base = 10;
+    if (s.starts_with("0x") || s.starts_with("0X")) {
+        base = 16;
+        s.remove_prefix(2);
+    } else if (s.starts_with("0b") || s.starts_with("0B")) {
+        base = 2;
+        s.remove_prefix(2);
+    }
+    if (s.empty()) {
+        error = std::format("invalid integer value '{}'", raw);
+        return std::nullopt;
+    }
+
     uint64_t value = 0;
-    auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), value);
+    auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), value, base);
     if (ec != std::errc{} || ptr != s.data() + s.size()) {
-        error = std::format("invalid integer value '{}'", s);
+        error = std::format("invalid integer value '{}'", raw);
         return std::nullopt;
     }
 

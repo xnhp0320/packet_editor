@@ -37,6 +37,10 @@ bool Lexer::is_hex_digit(char c) {
     return std::isxdigit(static_cast<unsigned char>(c));
 }
 
+bool is_binary_digit(char c) {
+    return c == '0' || c == '1';
+}
+
 void Lexer::skip_whitespace() {
     while (pos_ < source_.size()) {
         char c = source_[pos_];
@@ -86,6 +90,17 @@ std::optional<Token> Lexer::lex_number() {
                 return std::nullopt;
             }
             while (pos_ < source_.size() && is_hex_digit(source_[pos_])) {
+                ++pos_;
+            }
+            return Token{TokenType::IntegerLiteral, source_.substr(start, pos_ - start), start};
+        }
+        if (pos_ < source_.size() && (source_[pos_] == 'b' || source_[pos_] == 'B')) {
+            ++pos_;
+            if (pos_ >= source_.size() || !is_binary_digit(source_[pos_])) {
+                error_ = "invalid binary literal";
+                return std::nullopt;
+            }
+            while (pos_ < source_.size() && is_binary_digit(source_[pos_])) {
                 ++pos_;
             }
             return Token{TokenType::IntegerLiteral, source_.substr(start, pos_ - start), start};

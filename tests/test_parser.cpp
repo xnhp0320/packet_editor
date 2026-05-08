@@ -67,6 +67,14 @@ TEST(ParserTest, HexNumber) {
     EXPECT_EQ(std::get<int64_t>(*(*pkt)[0].attributes[0].value), 255);
 }
 
+TEST(ParserTest, BinaryNumber) {
+    Parser parser("Raw(len=0b101010)");
+    auto pkt = parser.parse_packet();
+    ASSERT_TRUE(pkt.has_value());
+    EXPECT_EQ(pkt->size(), 1);
+    EXPECT_EQ(std::get<int64_t>(*(*pkt)[0].attributes[0].value), 42);
+}
+
 TEST(ParserTest, StringEscape) {
     Parser parser(R"(Raw(data="line1\nline2\ttabbed"))");
     auto pkt = parser.parse_packet();

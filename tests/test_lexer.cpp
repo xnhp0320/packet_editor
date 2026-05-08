@@ -93,7 +93,7 @@ TEST(LexerTest, StringEscape) {
 }
 
 TEST(LexerTest, Numbers) {
-    Lexer lexer("123 0 0xFF 0xab 0x0");
+    Lexer lexer("123 0 0xFF 0xab 0x0 0b1010 0B11");
     auto t = lexer.next();
     ASSERT_TRUE(t.has_value());
     EXPECT_EQ(t->type, TokenType::IntegerLiteral);
@@ -118,6 +118,16 @@ TEST(LexerTest, Numbers) {
     ASSERT_TRUE(t.has_value());
     EXPECT_EQ(t->type, TokenType::IntegerLiteral);
     EXPECT_EQ(t->lexeme, "0x0");
+
+    t = lexer.next();
+    ASSERT_TRUE(t.has_value());
+    EXPECT_EQ(t->type, TokenType::IntegerLiteral);
+    EXPECT_EQ(t->lexeme, "0b1010");
+
+    t = lexer.next();
+    ASSERT_TRUE(t.has_value());
+    EXPECT_EQ(t->type, TokenType::IntegerLiteral);
+    EXPECT_EQ(t->lexeme, "0B11");
 
     t = lexer.next();
     ASSERT_TRUE(t.has_value());

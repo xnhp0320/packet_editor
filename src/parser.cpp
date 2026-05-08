@@ -93,9 +93,12 @@ std::optional<ValueType> Parser::parse_number_value(std::string_view raw) {
     if (num.starts_with("0x") || num.starts_with("0X")) {
         base = 16;
         num = num.substr(2);
+    } else if (num.starts_with("0b") || num.starts_with("0B")) {
+        base = 2;
+        num = num.substr(2);
     }
     auto [ptr, ec] = std::from_chars(num.data(), num.data() + num.size(), value, base);
-    if (ec != std::errc{}) {
+    if (ec != std::errc{} || ptr != num.data() + num.size()) {
         return std::nullopt;
     }
     if (negative) {
