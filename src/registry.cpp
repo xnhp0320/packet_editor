@@ -1,8 +1,7 @@
 #include "packet/registry.hpp"
+#include "packet/util.hpp"
 
-#include <charconv>
 #include <format>
-#include <string_view>
 #include <utility>
 
 namespace packet {
@@ -15,66 +14,6 @@ void register_bit_types(Registry& registry, std::index_sequence<Is...>) {
                             std::make_unique<BitsValidator<Is + 1>>()), ...);
 }
 
-size_t bit_width_for_type(const std::optional<std::string>& type_name) {
-    if (!type_name) {
-        return 0;
-    }
-
-    const auto type = std::string_view{*type_name};
-    if (type == "mac") {
-        return 48;
-    }
-    if (type == "ipv4" || type == "ipv4_range" || type == "ipv4_ranges") {
-        return 32;
-    }
-    if (type == "ipv6" || type == "ipv6_range" || type == "ipv6_ranges") {
-        return 128;
-    }
-    if (type.starts_with('b')) {
-        size_t width = 0;
-        auto digits = type.substr(1);
-        auto [ptr, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), width);
-        if (ec == std::errc{} && ptr == digits.data() + digits.size()) {
-            return width;
-        }
-    }
-    return 0;
-}
-
-ConstructorValue default_value_for_type(const std::optional<std::string>& type_name) {
-    if (!type_name) {
-        return uint64_t{0};
-    }
-
-    const auto type = std::string_view{*type_name};
-    if (type == "mac") {
-        return MacAddr::from_bytes({});
-    }
-    if (type == "ipv4") {
-        return IPv4::from_bytes({});
-    }
-    if (type == "ipv6") {
-        return IPv6::from_bytes({});
-    }
-    if (type == "ipv4_range") {
-        auto zero = IPv4::from_bytes({});
-        return IPv4Range{zero, zero};
-    }
-    if (type == "ipv6_range") {
-        auto zero = IPv6::from_bytes({});
-        return IPv6Range{zero, zero};
-    }
-    if (type == "ipv4_ranges") {
-        auto zero = IPv4::from_bytes({});
-        return std::vector<IPv4Range>{IPv4Range{zero, zero}};
-    }
-    if (type == "ipv6_ranges") {
-        auto zero = IPv6::from_bytes({});
-        return std::vector<IPv6Range>{IPv6Range{zero, zero}};
-    }
-    return uint64_t{0};
-}
-
 } // namespace
 
 Registry::Registry() {
@@ -82,10 +21,10 @@ Registry::Registry() {
     register_type("ipv4", std::make_unique<IPv4Validator>());
     register_type("ipv6", std::make_unique<IPv6Validator>());
 
-    register_type("ipv4_range", std::make_unique<RangeValidator<IPv4Validator, 32>>());
-    register_type("ipv6_range", std::make_unique<RangeValidator<IPv6Validator, 128>>());
-    register_type("ipv4_ranges", std::make_unique<RangeListValidator<IPv4Validator, 32>>());
-    register_type("ipv6_ranges", std::make_unique<RangeListValidator<IPv6Validator, 128>>());
+    register_type("ipv4_range", std::make_unique<IPv4RangeValidator>());
+    register_type("ipv6_range", std::make_unique<IPv6RangeValidator>());
+    register_type("ipv4_ranges", std::make_unique<IPv4RangeListValidator>());
+    register_type("ipv6_ranges", std::make_unique<IPv6RangeListValidator>());
 
     register_bit_types(*this, std::make_index_sequence<64>{});
 
@@ -170,13 +109,13 @@ Registry& Registry::register_header(std::string protocol, std::vector<AttrSpec> 
     HeaderSpec header_spec{protocol, {}, 0};
     for (auto& attr : attrs) {
         names.insert(attr.name);
-        auto bit_width = bit_width_for_type(attr.type_name);
+        auto bit_width = bit_width_for_type_name(attr.type_name);
         header_spec.fields.push_back(FieldSpec{
             attr.name,
             attr.type_name,
             header_spec.bit_width,
             bit_width,
-            attr.default_value.value_or(default_value_for_type(attr.type_name)),
+            attr.default_value.value_or(default_constructor_value_for_type(attr.type_name)),
         });
         header_spec.bit_width += bit_width;
         if (attr.type_name) {

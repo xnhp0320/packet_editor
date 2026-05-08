@@ -39,4 +39,52 @@ std::optional<std::string> IPv6Validator::validate(const ValueType& value) const
     return std::nullopt;
 }
 
+std::optional<std::string> IPv4RangeValidator::validate(const ValueType& value) const {
+    if (!std::holds_alternative<std::string>(value)) {
+        return IPv4Validator{}.validate(value);
+    }
+
+    std::string error;
+    if (!parse_ipv4_range(std::get<std::string>(value), error)) {
+        return error;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> IPv6RangeValidator::validate(const ValueType& value) const {
+    if (!std::holds_alternative<std::string>(value)) {
+        return IPv6Validator{}.validate(value);
+    }
+
+    std::string error;
+    if (!parse_ipv6_range(std::get<std::string>(value), error)) {
+        return error;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> IPv4RangeListValidator::validate(const ValueType& value) const {
+    if (!std::holds_alternative<std::string>(value)) {
+        return IPv4RangeValidator{}.validate(value);
+    }
+
+    std::string error;
+    if (!parse_ipv4_ranges(std::get<std::string>(value), error)) {
+        return error;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> IPv6RangeListValidator::validate(const ValueType& value) const {
+    if (!std::holds_alternative<std::string>(value)) {
+        return IPv6RangeValidator{}.validate(value);
+    }
+
+    std::string error;
+    if (!parse_ipv6_ranges(std::get<std::string>(value), error)) {
+        return error;
+    }
+    return std::nullopt;
+}
+
 } // namespace packet

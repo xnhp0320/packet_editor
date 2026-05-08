@@ -140,6 +140,7 @@ add_library(packet
     src/packet_constructor.cpp
     src/registry.cpp
     src/type_validator.cpp
+    src/util.cpp
     src/value.cpp
 )
 
