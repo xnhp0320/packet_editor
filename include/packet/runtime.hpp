@@ -22,8 +22,10 @@ public:
         int eal_parsed_args = 0;
         uint16_t port_id = 0;
         size_t packet_len = 0;
-        uint16_t tx_attempted = 0;
-        uint16_t tx_sent = 0;
+        uint64_t total_flows = 0;
+        uint64_t planned_packets = 0;
+        uint64_t tx_attempted = 0;
+        uint64_t tx_sent = 0;
     };
 
     Runtime();
@@ -37,6 +39,7 @@ private:
     struct Config {
         Packet packet;
         std::vector<std::string> dpdk_args;
+        std::optional<uint64_t> packet_count;
     };
 
     static std::optional<Config> build_config(const Program& program, Result& result);

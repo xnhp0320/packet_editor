@@ -59,7 +59,8 @@ int main(int argc, char** argv) {
     std::cout << "DPDK runtime completed; rte_eal_init parsed "
               << result.eal_parsed_args << " argument(s), port "
               << result.port_id << " sent " << result.tx_sent << '/'
-              << result.tx_attempted << " packet(s), packet_len "
-              << result.packet_len << " bytes\n";
+              << result.tx_attempted << " packet(s), planned "
+              << result.planned_packets << " of " << result.total_flows
+              << " flow(s), packet_len " << result.packet_len << " bytes\n";
     return 0;
 }

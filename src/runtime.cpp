@@ -10,10 +10,12 @@
 #include <rte_mbuf.h>
 #include <rte_mempool.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <format>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -90,6 +92,16 @@ struct MempoolDeleter {
 };
 
 using MempoolPtr = std::unique_ptr<rte_mempool, MempoolDeleter>;
+
+struct RuntimePacket {
+    std::vector<std::byte> base_payload;
+    std::vector<PayloadFieldModifier> modifiers;
+};
+
+struct FlowIndexPlan {
+    uint64_t total_flows = 1;
+    uint64_t planned_packets = 1;
+};
 
 #ifdef __linux__
 class Fd {
@@ -239,9 +251,9 @@ std::optional<PacketConstructor> build_packet_constructor(const Packet& packet,
     return std::move(*constructor.packet);
 }
 
-std::optional<std::vector<std::byte>> serialize_runtime_packet(const PacketConstructor& packet,
-                                                               const Registry& registry,
-                                                               Runtime::Result& result) {
+std::optional<RuntimePacket> serialize_runtime_packet(const PacketConstructor& packet,
+                                                      const Registry& registry,
+                                                      Runtime::Result& result) {
     std::vector<std::byte> payload(runtime_max_packet_size);
     auto serialized = serialize_packet(packet, registry, PacketBufferView{payload});
     result.errors.insert(result.errors.end(), serialized.errors.begin(), serialized.errors.end());
@@ -257,13 +269,58 @@ std::optional<std::vector<std::byte>> serialize_runtime_packet(const PacketConst
 
     payload.resize(serialized.packet_len);
     result.packet_len = serialized.packet_len;
-    return payload;
+    return RuntimePacket{
+        std::move(payload),
+        std::move(serialized.modifiers),
+    };
 }
 
-bool transmit_one_packet(uint16_t port_id,
-                         rte_mempool& mbuf_pool,
-                         std::span<const std::byte> payload,
-                         Runtime::Result& result) {
+std::optional<FlowIndexPlan> plan_flow_indexes(const std::vector<PayloadFieldModifier>& modifiers,
+                                               std::optional<uint64_t> packet_count,
+                                               Runtime::Result& result) {
+    FlowIndexPlan plan;
+    for (const auto& modifier : modifiers) {
+        if (modifier.value_count == 0) {
+            result.errors.push_back(std::format("modifier '{}.{}' has zero values",
+                                                modifier.protocol,
+                                                modifier.field));
+            return std::nullopt;
+        }
+        if (plan.total_flows > std::numeric_limits<uint64_t>::max() / modifier.value_count) {
+            result.errors.push_back("range expansion has more than 18446744073709551615 flows");
+            return std::nullopt;
+        }
+        plan.total_flows *= modifier.value_count;
+    }
+
+    plan.planned_packets = packet_count ? std::min(plan.total_flows, *packet_count)
+                                        : plan.total_flows;
+    result.total_flows = plan.total_flows;
+    result.planned_packets = plan.planned_packets;
+    return plan;
+}
+
+bool apply_flow_index(std::span<std::byte> payload,
+                      const std::vector<PayloadFieldModifier>& modifiers,
+                      uint64_t flow_index,
+                      Runtime::Result& result) {
+    uint64_t divisor = 1;
+    for (const auto& modifier : modifiers) {
+        const auto value_index = (flow_index / divisor) % modifier.value_count;
+        std::string error;
+        if (!modifier.apply(payload, value_index, error)) {
+            result.errors.push_back(std::move(error));
+            return false;
+        }
+        divisor *= modifier.value_count;
+    }
+    return true;
+}
+
+bool transmit_packet(uint16_t port_id,
+                     rte_mempool& mbuf_pool,
+                     std::span<const std::byte> payload,
+                     Runtime::Result& result) {
     rte_mbuf* mbuf = rte_pktmbuf_alloc(&mbuf_pool);
     if (mbuf == nullptr) {
         result.errors.push_back(std::format("rte_pktmbuf_alloc failed: {}", rte_strerror(rte_errno)));
@@ -280,16 +337,41 @@ bool transmit_one_packet(uint16_t port_id,
     std::memcpy(packet_data, payload.data(), payload.size());
 
     rte_mbuf* packets[] = {mbuf};
-    result.tx_attempted = 1;
-    result.tx_sent = rte_eth_tx_burst(port_id, runtime_queue_id, packets, 1);
-    if (result.tx_sent != result.tx_attempted) {
+    ++result.tx_attempted;
+    const uint16_t sent = rte_eth_tx_burst(port_id, runtime_queue_id, packets, 1);
+    result.tx_sent += sent;
+    if (sent != 1) {
         rte_pktmbuf_free(mbuf);
-        result.errors.push_back(std::format("rte_eth_tx_burst sent {} of {} packet(s)",
-                                            result.tx_sent,
-                                            result.tx_attempted));
+        result.errors.push_back("rte_eth_tx_burst sent 0 of 1 packet(s)");
         return false;
     }
 
+    return true;
+}
+
+bool transmit_planned_packets(uint16_t port_id,
+                              rte_mempool& mbuf_pool,
+                              const PacketConstructor& packet,
+                              const Registry& registry,
+                              const RuntimePacket& runtime_packet,
+                              const FlowIndexPlan& plan,
+                              Runtime::Result& result) {
+    for (uint64_t flow_index = 0; flow_index < plan.planned_packets; ++flow_index) {
+        auto payload = runtime_packet.base_payload;
+        if (!apply_flow_index(payload, runtime_packet.modifiers, flow_index, result)) {
+            return false;
+        }
+
+        auto fixed = fixup_packet(packet, registry, PacketBufferView{payload}, result.packet_len);
+        result.errors.insert(result.errors.end(), fixed.errors.begin(), fixed.errors.end());
+        if (!fixed.ok) {
+            return false;
+        }
+
+        if (!transmit_packet(port_id, mbuf_pool, payload, result)) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -430,8 +512,24 @@ std::optional<Runtime::Config> Runtime::build_config(const Program& program, Res
         }
     }
 
+    auto packet_count_it = variables.find("PACKET_COUNT");
+    if (packet_count_it != variables.end()) {
+        auto packet_count_value = evaluate(packet_count_it->second->expression);
+        if (!std::holds_alternative<int64_t>(packet_count_value)) {
+            result.errors.emplace_back("variable 'PACKET_COUNT' must be an integer expression");
+        } else {
+            const auto packet_count = std::get<int64_t>(packet_count_value);
+            if (packet_count <= 0) {
+                result.errors.emplace_back("variable 'PACKET_COUNT' must be positive");
+            } else {
+                config.packet_count = static_cast<uint64_t>(packet_count);
+            }
+        }
+    }
+
     for (const auto& variable : program.variables) {
-        if (variable.name != "PACKET" && variable.name != "DPDK_ARGS") {
+        if (variable.name != "PACKET" && variable.name != "DPDK_ARGS" &&
+            variable.name != "PACKET_COUNT") {
             result.warnings.push_back(std::format("unknown runtime variable '{}'", variable.name));
         }
     }
@@ -462,7 +560,29 @@ std::optional<Runtime::Config> Runtime::checked_config(const Program& program, R
 
 Runtime::Result Runtime::check(const Program& program) const {
     Result result;
-    checked_config(program, result);
+    auto config = checked_config(program, result);
+    if (!config) {
+        return result;
+    }
+
+    auto packet = build_packet_constructor(config->packet, registry_, result);
+    if (!packet) {
+        result.ok = false;
+        return result;
+    }
+
+    auto runtime_packet = serialize_runtime_packet(*packet, registry_, result);
+    if (!runtime_packet) {
+        result.ok = false;
+        return result;
+    }
+
+    if (!plan_flow_indexes(runtime_packet->modifiers, config->packet_count, result)) {
+        result.ok = false;
+        return result;
+    }
+
+    result.ok = true;
     return result;
 }
 
@@ -495,8 +615,14 @@ Runtime::Result Runtime::run(const Program& program, std::string_view eal_progra
         return result;
     }
 
-    auto payload = serialize_runtime_packet(*packet, registry_, result);
-    if (!payload) {
+    auto runtime_packet = serialize_runtime_packet(*packet, registry_, result);
+    if (!runtime_packet) {
+        result.ok = false;
+        return result;
+    }
+
+    auto flow_plan = plan_flow_indexes(runtime_packet->modifiers, config->packet_count, result);
+    if (!flow_plan) {
         result.ok = false;
         return result;
     }
@@ -517,7 +643,13 @@ Runtime::Result Runtime::run(const Program& program, std::string_view eal_progra
         probe_tap_port(result) &&
         configure_and_start_port(runtime_port_id, *mbuf_pool, result)) {
         port_started = true;
-        transmit_one_packet(runtime_port_id, *mbuf_pool, *payload, result);
+        transmit_planned_packets(runtime_port_id,
+                                 *mbuf_pool,
+                                 *packet,
+                                 registry_,
+                                 *runtime_packet,
+                                 *flow_plan,
+                                 result);
     }
 
     if (port_started) {
