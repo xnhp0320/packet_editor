@@ -7,7 +7,7 @@
 using namespace packet;
 
 TEST(CheckerTest, AllKnownHeaders) {
-    Parser parser("Ether()/IP()/IPv6()/TCP()/UDP()/ICMP()/VXLAN()");
+    Parser parser("Ether()/VLAN()/IP()/IPv6()/TCP()/UDP()/ICMP()/VXLAN()");
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
@@ -110,6 +110,18 @@ TEST(CheckerTest, UdpAttrs) {
 
 TEST(CheckerTest, IcmpAttrs) {
     Parser parser(R"(ICMP(type=8,code=0,chksum=0xffff,id=1,seq=1))");
+    auto pkt = parser.parse_packet();
+    ASSERT_TRUE(pkt.has_value());
+
+    Registry registry;
+    Checker checker{registry};
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.warnings.empty());
+}
+
+TEST(CheckerTest, VlanAttrs) {
+    Parser parser(R"(VLAN(prio=7,dei=1,vlan=4095,type=0x0800))");
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 

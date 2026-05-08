@@ -116,6 +116,70 @@ TEST(PacketConstructorTest, NormalizesMacAndRanges) {
     EXPECT_EQ(ipv6_ranges[0].last.to_string(), "2001:0db8:0000:0000:0000:0000:0000:0003");
 }
 
+TEST(PacketConstructorTest, VlanOffsetsAndFields) {
+    auto result = build("Ether()/VLAN()/IP()");
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+    ASSERT_EQ(result.packet->size(), 3);
+
+    const auto& ether = (*result.packet)[0];
+    const auto& vlan = (*result.packet)[1];
+    const auto& ip = (*result.packet)[2];
+
+    EXPECT_EQ(ether.protocol, "Ether");
+    EXPECT_EQ(ether.offset, 0);
+    EXPECT_EQ(vlan.protocol, "VLAN");
+    EXPECT_EQ(vlan.offset, 14);
+    EXPECT_EQ(ip.protocol, "IP");
+    EXPECT_EQ(ip.offset, 18);
+
+    ASSERT_EQ(vlan.fields.size(), 4);
+    EXPECT_EQ(vlan.fields[0].name, "prio");
+    EXPECT_EQ(vlan.fields[1].name, "dei");
+    EXPECT_EQ(vlan.fields[2].name, "vlan");
+    EXPECT_EQ(vlan.fields[3].name, "type");
+}
+
+TEST(PacketConstructorTest, VlanValuesOverrideDefaults) {
+    auto result = build("VLAN(prio=7,dei=1,vlan=4095,type=0x0800)");
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+    ASSERT_EQ(result.packet->size(), 1);
+
+    const auto& vlan = (*result.packet)[0];
+    EXPECT_EQ(std::get<uint64_t>(field(vlan, "prio").value), 7);
+    EXPECT_EQ(std::get<uint64_t>(field(vlan, "dei").value), 1);
+    EXPECT_EQ(std::get<uint64_t>(field(vlan, "vlan").value), 4095);
+    EXPECT_EQ(std::get<uint64_t>(field(vlan, "type").value), 0x0800);
+    EXPECT_TRUE(field(vlan, "prio").explicitly_set);
+    EXPECT_TRUE(field(vlan, "dei").explicitly_set);
+    EXPECT_TRUE(field(vlan, "vlan").explicitly_set);
+    EXPECT_TRUE(field(vlan, "type").explicitly_set);
+}
+
+TEST(PacketConstructorTest, VxlanDefaultsAndValues) {
+    auto result = build("UDP()/VXLAN(vni=100)");
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+    ASSERT_EQ(result.packet->size(), 2);
+
+    const auto& vxlan = (*result.packet)[1];
+    EXPECT_EQ(vxlan.protocol, "VXLAN");
+    EXPECT_EQ(vxlan.offset, 8);
+    ASSERT_EQ(vxlan.fields.size(), 4);
+    EXPECT_EQ(vxlan.fields[0].name, "flags");
+    EXPECT_EQ(vxlan.fields[1].name, "reserved");
+    EXPECT_EQ(vxlan.fields[2].name, "vni");
+    EXPECT_EQ(vxlan.fields[3].name, "reserved2");
+    EXPECT_EQ(std::get<uint64_t>(field(vxlan, "flags").value), 0x08);
+    EXPECT_EQ(std::get<uint64_t>(field(vxlan, "vni").value), 100);
+    EXPECT_FALSE(field(vxlan, "flags").explicitly_set);
+    EXPECT_TRUE(field(vxlan, "vni").explicitly_set);
+}
+
 TEST(PacketConstructorTest, UnknownHeaderFails) {
     auto result = build("BadHeader()");
 
@@ -163,6 +227,14 @@ TEST(PacketConstructorTest, BitWidthOverflowFails) {
     EXPECT_FALSE(result.ok);
     ASSERT_EQ(result.errors.size(), 1);
     EXPECT_NE(result.errors[0].find("16 bits"), std::string::npos);
+}
+
+TEST(PacketConstructorTest, VlanBitWidthOverflowFails) {
+    auto result = build("VLAN(vlan=4096)");
+
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.errors.size(), 1);
+    EXPECT_NE(result.errors[0].find("12 bits"), std::string::npos);
 }
 
 TEST(PacketConstructorTest, BitRangesDefaultToScalarZero) {

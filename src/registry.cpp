@@ -90,6 +90,13 @@ Registry::Registry() {
         {"seq",    "b16"},
     });
 
+    register_header("VLAN", {
+        {"prio", "b3"},
+        {"dei",  "b1"},
+        {"vlan", "b12"},
+        {"type", "b16"},
+    });
+
     register_header("VXLAN", {
         {"flags",     "b8", ConstructorValue{uint64_t{0x08}}},
         {"reserved",  "b24"},
