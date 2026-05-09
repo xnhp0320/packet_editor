@@ -41,9 +41,8 @@ struct HeaderSpec {
     size_t bit_width = 0;
 };
 
-std::optional<std::string> validate_constructor_value(const FieldSpec& field,
-                                                      const ConstructorValue& value);
-std::optional<std::string> validate_constructor_value(const OptionSpec& option,
+std::optional<std::string> validate_constructor_value(std::string_view name,
+                                                      std::string_view type_name,
                                                       const ConstructorValue& value);
 
 struct InferenceRule {

@@ -20,9 +20,11 @@ void register_bit_types(Registry& registry, std::index_sequence<Is...>) {
 
 } // namespace
 
-std::optional<std::string> validate_constructor_value(const FieldSpec& field,
+std::optional<std::string> validate_constructor_value(std::string_view,
+                                                      std::string_view type_name,
                                                       const ConstructorValue& value) {
-    const auto type = std::string_view{field.type_name};
+    const auto type = type_name;
+    const auto bit_width = bit_width_for_type_name(type);
     auto integer_fits = [](uint64_t integer, size_t bit_width) -> std::optional<std::string> {
         if (bit_width < 64 && integer > ((uint64_t{1} << bit_width) - 1)) {
             return std::format("value {} does not fit in {} bits", integer, bit_width);
@@ -58,7 +60,7 @@ std::optional<std::string> validate_constructor_value(const FieldSpec& field,
         if (!std::holds_alternative<uint64_t>(value)) {
             return std::string{"bit constructor fields require integer values"};
         }
-        return integer_fits(std::get<uint64_t>(value), field.bit_width);
+        return integer_fits(std::get<uint64_t>(value), bit_width);
     }
     if (type == "mac") {
         if (std::holds_alternative<MacAddr>(value)) {
@@ -104,18 +106,6 @@ std::optional<std::string> validate_constructor_value(const FieldSpec& field,
     }
 
     return std::format("unsupported constructor type '{}'", type);
-}
-
-std::optional<std::string> validate_constructor_value(const OptionSpec& option,
-                                                      const ConstructorValue& value) {
-    auto field = FieldSpec{
-        option.name,
-        option.type_name,
-        0,
-        bit_width_for_type_name(option.type_name),
-        value,
-    };
-    return validate_constructor_value(field, value);
 }
 
 Registry::Registry() {
@@ -241,7 +231,7 @@ Registry& Registry::register_header(std::string protocol,
             bit_width,
             attr.default_value.value_or(default_constructor_value_for_type(attr.type_name)),
         };
-        if (auto error = validate_constructor_value(field, field.default_value)) {
+        if (auto error = validate_constructor_value(field.name, field.type_name, field.default_value)) {
             throw std::invalid_argument(std::format("invalid default value for '{}.{}': {}",
                                                     protocol,
                                                     field.name,
@@ -259,7 +249,9 @@ Registry& Registry::register_header(std::string protocol,
             attr.default_value,
         };
         if (option.default_value) {
-            if (auto error = validate_constructor_value(option, *option.default_value)) {
+            if (auto error = validate_constructor_value(option.name,
+                                                        option.type_name,
+                                                        *option.default_value)) {
                 throw std::invalid_argument(std::format("invalid default value for '{}.{}': {}",
                                                         protocol,
                                                         option.name,
@@ -295,7 +287,7 @@ Registry& Registry::register_inference_rule(std::string parent_header,
                                                 parent_header,
                                                 target_field));
     }
-    if (auto error = validate_constructor_value(*target_it, value)) {
+    if (auto error = validate_constructor_value(target_it->name, target_it->type_name, value)) {
         throw std::invalid_argument(std::format(
             "inference rule '{}'/'{}' has invalid value for '{}.{}': {}",
             parent_header,
