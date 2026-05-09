@@ -372,7 +372,7 @@ bool serialize_field(const FieldSpec& spec,
                      std::span<std::byte> payload,
                      std::vector<std::string>& errors) {
     std::string error;
-    const auto type = spec.type_name ? std::string_view{*spec.type_name} : std::string_view{};
+    const auto type = std::string_view{spec.type_name};
     if (type == "mac") {
         if (!std::holds_alternative<MacAddr>(field.value)) {
             errors.push_back(std::format("field '{}' is not a mac value", field.name));

@@ -151,10 +151,10 @@ TEST(CheckerTest, CustomHeaderRegistration) {
 
     Registry registry;
     Checker checker{registry};
-    registry.register_header("MyProto", {
-        {"field1", std::nullopt},
-        {"field2", std::nullopt},
-        {"field3", std::nullopt},
+    registry.register_header("MyProto", {}, {
+        {"field1", "b64"},
+        {"field2", "b64"},
+        {"field3", "b64"},
     });
 
     auto result = checker.check(*pkt);
@@ -170,9 +170,9 @@ TEST(CheckerTest, CustomHeaderUnknownAttr) {
 
     Registry registry;
     Checker checker{registry};
-    registry.register_header("MyProto", {
-        {"field1", std::nullopt},
-        {"field2", std::nullopt},
+    registry.register_header("MyProto", {}, {
+        {"field1", "b64"},
+        {"field2", "b64"},
     });
 
     auto result = checker.check(*pkt);
@@ -411,7 +411,7 @@ TEST(CheckerTest, CustomTypeRegistration) {
     Registry registry;
     Checker checker{registry};
     registry.register_type("always_fails", std::make_unique<AlwaysFails>());
-    registry.register_header("MyProto", {{"addr", "always_fails"}});
+    registry.register_header("MyProto", {}, {{"addr", "always_fails"}});
 
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);

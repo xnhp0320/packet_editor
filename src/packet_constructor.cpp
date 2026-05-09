@@ -11,18 +11,10 @@ namespace packet {
 
 namespace {
 
-std::optional<ConstructorValue> construct_value(const FieldSpec& field,
+std::optional<ConstructorValue> construct_value(std::string_view type,
+                                                size_t bit_width,
                                                 const ValueType& value,
                                                 std::string& error) {
-    if (!field.type_name) {
-        if (std::holds_alternative<int64_t>(value) && std::get<int64_t>(value) >= 0) {
-            return ConstructorValue{static_cast<uint64_t>(std::get<int64_t>(value))};
-        }
-        error = "untyped constructor fields only support non-negative integer values";
-        return std::nullopt;
-    }
-
-    const auto type = std::string_view{*field.type_name};
     if (auto range_bit_width = bit_range_width_for_type_name(type)) {
         if (std::holds_alternative<int64_t>(value)) {
             if (auto bit_error = validate_bit_value(value, *range_bit_width)) {
@@ -62,7 +54,7 @@ std::optional<ConstructorValue> construct_value(const FieldSpec& field,
             error = "negative integer value";
             return std::nullopt;
         }
-        if (auto bit_error = validate_bit_value(value, field.bit_width)) {
+        if (auto bit_error = validate_bit_value(value, bit_width)) {
             error = *bit_error;
             return std::nullopt;
         }
@@ -129,6 +121,18 @@ std::optional<ConstructorValue> construct_value(const FieldSpec& field,
 
     error = std::format("unsupported constructor type '{}'", type);
     return std::nullopt;
+}
+
+std::optional<ConstructorValue> construct_value(const FieldSpec& field,
+                                                const ValueType& value,
+                                                std::string& error) {
+    return construct_value(field.type_name, field.bit_width, value, error);
+}
+
+std::optional<ConstructorValue> construct_value(const OptionSpec& option,
+                                                const ValueType& value,
+                                                std::string& error) {
+    return construct_value(option.type_name, bit_width_for_type_name(option.type_name), value, error);
 }
 
 FieldConstructor* find_field(HeaderConstructor& header, std::string_view name) {
@@ -221,8 +225,10 @@ PacketConstructorBuilder::Result PacketConstructorBuilder::build(const Packet& p
             header.protocol,
             packet_bit_offset / 8,
             {},
+            {},
         };
         header_constructor.fields.reserve(header_spec->fields.size());
+        header_constructor.options.reserve(header_spec->options.size());
 
         for (const auto& field : header_spec->fields) {
             auto attr_it = attrs.find(field.name);
@@ -256,11 +262,48 @@ PacketConstructorBuilder::Result PacketConstructorBuilder::build(const Packet& p
             });
         }
 
+        for (const auto& option : header_spec->options) {
+            auto attr_it = attrs.find(option.name);
+            if (attr_it == attrs.end()) {
+                if (option.default_value) {
+                    header_constructor.options.push_back(OptionConstructor{
+                        option.name,
+                        *option.default_value,
+                        false,
+                    });
+                }
+                continue;
+            }
+
+            const auto& attr = *attr_it->second;
+            if (!attr.value) {
+                result.errors.push_back(std::format("attribute '{}' in header '{}' requires a value",
+                                                    attr.name, header.protocol));
+                continue;
+            }
+
+            std::string error;
+            auto value = construct_value(option, *attr.value, error);
+            if (!value) {
+                result.errors.push_back(std::format("invalid '{}' in header '{}': {}",
+                                                    attr.name, header.protocol, error));
+                continue;
+            }
+            header_constructor.options.push_back(OptionConstructor{
+                option.name,
+                std::move(*value),
+                true,
+            });
+        }
+
         for (const auto& [name, attr] : attrs) {
-            auto known = std::ranges::any_of(header_spec->fields, [name](const FieldSpec& field) {
+            auto known_field = std::ranges::any_of(header_spec->fields, [name](const FieldSpec& field) {
                 return field.name == name;
             });
-            if (!known) {
+            auto known_option = std::ranges::any_of(header_spec->options, [name](const OptionSpec& option) {
+                return option.name == name;
+            });
+            if (!known_field && !known_option) {
                 result.errors.push_back(std::format("unknown attribute '{}' in header '{}'",
                                                     name, header.protocol));
             }

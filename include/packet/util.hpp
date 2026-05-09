@@ -14,10 +14,8 @@ namespace packet {
 std::string_view trim_ascii_whitespace(std::string_view s);
 
 size_t bit_width_for_type_name(std::string_view type_name);
-size_t bit_width_for_type_name(const std::optional<std::string>& type_name);
 std::optional<size_t> bit_range_width_for_type_name(std::string_view type_name);
 ConstructorValue default_constructor_value_for_type(std::string_view type_name);
-ConstructorValue default_constructor_value_for_type(const std::optional<std::string>& type_name);
 
 std::optional<std::string> validate_bit_value(const ValueType& value, size_t bit_width);
 std::optional<std::string> validate_bit_range_value(const ValueType& value, size_t bit_width);

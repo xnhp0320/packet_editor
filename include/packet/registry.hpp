@@ -16,25 +16,34 @@ namespace packet {
 
 struct AttrSpec {
     std::string name;
-    std::optional<std::string> type_name;
+    std::string type_name;
     std::optional<ConstructorValue> default_value;
 };
 
 struct FieldSpec {
     std::string name;
-    std::optional<std::string> type_name;
+    std::string type_name;
     size_t bit_offset = 0;
     size_t bit_width = 0;
     ConstructorValue default_value = uint64_t{0};
 };
 
+struct OptionSpec {
+    std::string name;
+    std::string type_name;
+    std::optional<ConstructorValue> default_value;
+};
+
 struct HeaderSpec {
     std::string protocol;
     std::vector<FieldSpec> fields;
+    std::vector<OptionSpec> options;
     size_t bit_width = 0;
 };
 
 std::optional<std::string> validate_constructor_value(const FieldSpec& field,
+                                                      const ConstructorValue& value);
+std::optional<std::string> validate_constructor_value(const OptionSpec& option,
                                                       const ConstructorValue& value);
 
 struct InferenceRule {
@@ -56,7 +65,9 @@ public:
     Registry();
 
     Registry& register_type(std::string type_name, std::unique_ptr<TypeValidator> validator);
-    Registry& register_header(std::string protocol, std::vector<AttrSpec> attrs);
+    Registry& register_header(std::string protocol,
+                              std::vector<AttrSpec> fields,
+                              std::vector<AttrSpec> options = {});
     Registry& register_inference_rule(std::string parent_header,
                                       std::string child_header,
                                       std::string target_field,

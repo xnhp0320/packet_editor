@@ -22,14 +22,7 @@ void register_bit_types(Registry& registry, std::index_sequence<Is...>) {
 
 std::optional<std::string> validate_constructor_value(const FieldSpec& field,
                                                       const ConstructorValue& value) {
-    if (!field.type_name) {
-        if (std::holds_alternative<uint64_t>(value)) {
-            return std::nullopt;
-        }
-        return std::string{"untyped constructor fields require integer values"};
-    }
-
-    const auto type = std::string_view{*field.type_name};
+    const auto type = std::string_view{field.type_name};
     auto integer_fits = [](uint64_t integer, size_t bit_width) -> std::optional<std::string> {
         if (bit_width < 64 && integer > ((uint64_t{1} << bit_width) - 1)) {
             return std::format("value {} does not fit in {} bits", integer, bit_width);
@@ -111,6 +104,18 @@ std::optional<std::string> validate_constructor_value(const FieldSpec& field,
     }
 
     return std::format("unsupported constructor type '{}'", type);
+}
+
+std::optional<std::string> validate_constructor_value(const OptionSpec& option,
+                                                      const ConstructorValue& value) {
+    auto field = FieldSpec{
+        option.name,
+        option.type_name,
+        0,
+        bit_width_for_type_name(option.type_name),
+        value,
+    };
+    return validate_constructor_value(field, value);
 }
 
 Registry::Registry() {
@@ -217,14 +222,17 @@ Registry& Registry::register_type(std::string type_name, std::unique_ptr<TypeVal
     return *this;
 }
 
-Registry& Registry::register_header(std::string protocol, std::vector<AttrSpec> attrs) {
+Registry& Registry::register_header(std::string protocol,
+                                    std::vector<AttrSpec> fields,
+                                    std::vector<AttrSpec> options) {
     auto& names = attr_names_[protocol];
     auto& types = attr_types_[protocol];
     names.clear();
     types.clear();
-    HeaderSpec header_spec{protocol, {}, 0};
-    for (auto& attr : attrs) {
+    HeaderSpec header_spec{protocol, {}, {}, 0};
+    for (auto& attr : fields) {
         names.insert(attr.name);
+        types[attr.name] = attr.type_name;
         auto bit_width = bit_width_for_type_name(attr.type_name);
         auto field = FieldSpec{
             attr.name,
@@ -241,9 +249,24 @@ Registry& Registry::register_header(std::string protocol, std::vector<AttrSpec> 
         }
         header_spec.fields.push_back(std::move(field));
         header_spec.bit_width += bit_width;
-        if (attr.type_name) {
-            types[attr.name] = *attr.type_name;
+    }
+    for (auto& attr : options) {
+        names.insert(attr.name);
+        types[attr.name] = attr.type_name;
+        auto option = OptionSpec{
+            attr.name,
+            attr.type_name,
+            attr.default_value,
+        };
+        if (option.default_value) {
+            if (auto error = validate_constructor_value(option, *option.default_value)) {
+                throw std::invalid_argument(std::format("invalid default value for '{}.{}': {}",
+                                                        protocol,
+                                                        option.name,
+                                                        *error));
+            }
         }
+        header_spec.options.push_back(std::move(option));
     }
     header_specs_[protocol] = std::move(header_spec);
     return *this;

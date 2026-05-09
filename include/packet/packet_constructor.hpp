@@ -17,10 +17,17 @@ struct FieldConstructor {
     bool explicitly_set = false;
 };
 
+struct OptionConstructor {
+    std::string name;
+    ConstructorValue value;
+    bool explicitly_set = false;
+};
+
 struct HeaderConstructor {
     std::string protocol;
     size_t offset = 0;
     std::vector<FieldConstructor> fields;
+    std::vector<OptionConstructor> options;
 };
 
 using PacketConstructor = std::vector<HeaderConstructor>;

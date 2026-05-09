@@ -42,10 +42,6 @@ size_t bit_width_for_type_name(std::string_view type_name) {
     return 0;
 }
 
-size_t bit_width_for_type_name(const std::optional<std::string>& type_name) {
-    return type_name ? bit_width_for_type_name(std::string_view{*type_name}) : 0;
-}
-
 std::optional<size_t> bit_range_width_for_type_name(std::string_view type_name) {
     constexpr std::string_view suffix = "_ranges";
     if (!type_name.starts_with('b') || !type_name.ends_with(suffix)) {
@@ -88,11 +84,6 @@ ConstructorValue default_constructor_value_for_type(std::string_view type_name) 
         return std::vector<IPv6Range>{IPv6Range{zero, zero}};
     }
     return uint64_t{0};
-}
-
-ConstructorValue default_constructor_value_for_type(const std::optional<std::string>& type_name) {
-    return type_name ? default_constructor_value_for_type(std::string_view{*type_name})
-                     : ConstructorValue{uint64_t{0}};
 }
 
 std::optional<std::string> validate_bit_value(const ValueType& value, size_t bit_width) {

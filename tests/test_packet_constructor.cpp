@@ -42,6 +42,14 @@ const FieldConstructor& field(const HeaderConstructor& header, std::string_view 
     return *it;
 }
 
+const OptionConstructor& option(const HeaderConstructor& header, std::string_view name) {
+    auto it = std::ranges::find_if(header.options, [name](const OptionConstructor& option) {
+        return option.name == name;
+    });
+    EXPECT_NE(it, header.options.end());
+    return *it;
+}
+
 } // namespace
 
 TEST(PacketConstructorTest, BuildsDefaultsAndOffsets) {
@@ -353,6 +361,43 @@ TEST(PacketConstructorTest, BitRangesDefaultToScalarZero) {
     const auto& constructed = field((*result.packet)[0], "field");
     EXPECT_EQ(std::get<uint64_t>(constructed.value), 0);
     EXPECT_FALSE(constructed.explicitly_set);
+}
+
+TEST(PacketConstructorTest, OptionsAreConstructedButNotSerializedFields) {
+    Registry registry;
+    registry.register_header("Payload", {}, {
+        {"length", "b64", ConstructorValue{uint64_t{64}}},
+    });
+
+    auto result = build("Payload(length=100)", registry);
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+    ASSERT_EQ(result.packet->size(), 1);
+
+    const auto& payload = (*result.packet)[0];
+    EXPECT_TRUE(payload.fields.empty());
+    ASSERT_EQ(payload.options.size(), 1);
+    EXPECT_EQ(std::get<uint64_t>(option(payload, "length").value), 100);
+    EXPECT_TRUE(option(payload, "length").explicitly_set);
+}
+
+TEST(PacketConstructorTest, OptionsUseDefaults) {
+    Registry registry;
+    registry.register_header("Payload", {}, {
+        {"length", "b64", ConstructorValue{uint64_t{64}}},
+    });
+
+    auto result = build("Payload()", registry);
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+
+    const auto& payload = (*result.packet)[0];
+    EXPECT_TRUE(payload.fields.empty());
+    ASSERT_EQ(payload.options.size(), 1);
+    EXPECT_EQ(std::get<uint64_t>(option(payload, "length").value), 64);
+    EXPECT_FALSE(option(payload, "length").explicitly_set);
 }
 
 TEST(PacketConstructorTest, BitRangesPreserveScalarSyntaxAsUInt64) {
