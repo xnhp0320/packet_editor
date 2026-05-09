@@ -131,6 +131,58 @@ std::optional<ConstructorValue> construct_value(const FieldSpec& field,
     return std::nullopt;
 }
 
+FieldConstructor* find_field(HeaderConstructor& header, std::string_view name) {
+    auto it = std::ranges::find_if(header.fields, [name](const FieldConstructor& field) {
+        return field.name == name;
+    });
+    if (it == header.fields.end()) {
+        return nullptr;
+    }
+    return &*it;
+}
+
+void apply_inference_rules(PacketConstructor& constructor,
+                           const Registry& registry,
+                           PacketConstructorBuilder::Result& result) {
+    if (constructor.size() < 2) {
+        return;
+    }
+
+    for (auto parent = constructor.begin(); parent + 1 != constructor.end(); ++parent) {
+        const auto& child = *(parent + 1);
+        const auto* rules = registry.find_inference_rules(parent->protocol, child.protocol);
+        if (!rules) {
+            continue;
+        }
+
+        for (const auto& rule : *rules) {
+            auto* target = find_field(*parent, rule.target_field);
+            if (!target) {
+                result.errors.push_back(std::format(
+                    "inference rule '{}'/'{}' targets unknown field '{}.{}'",
+                    rule.parent_header,
+                    rule.child_header,
+                    parent->protocol,
+                    rule.target_field));
+                continue;
+            }
+
+            if (target->explicitly_set) {
+                if (target->value != rule.value) {
+                    result.warnings.push_back(std::format(
+                        "explicit '{}.{}' overrides inference from next header '{}'",
+                        parent->protocol,
+                        rule.target_field,
+                        child.protocol));
+                }
+                continue;
+            }
+
+            target->value = rule.value;
+        }
+    }
+}
+
 } // namespace
 
 PacketConstructorBuilder::PacketConstructorBuilder(const Registry& registry)
@@ -217,6 +269,13 @@ PacketConstructorBuilder::Result PacketConstructorBuilder::build(const Packet& p
         constructor.push_back(std::move(header_constructor));
         packet_bit_offset += header_spec->bit_width;
     }
+
+    if (!result.errors.empty()) {
+        result.ok = false;
+        return result;
+    }
+
+    apply_inference_rules(constructor, registry_, result);
 
     if (!result.errors.empty()) {
         result.ok = false;

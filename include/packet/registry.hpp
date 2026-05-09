@@ -34,10 +34,22 @@ struct HeaderSpec {
     size_t bit_width = 0;
 };
 
+std::optional<std::string> validate_constructor_value(const FieldSpec& field,
+                                                      const ConstructorValue& value);
+
+struct InferenceRule {
+    std::string parent_header;
+    std::string child_header;
+    std::string target_field;
+    ConstructorValue value;
+};
+
 using TypeRegistry = std::unordered_map<std::string, std::unique_ptr<TypeValidator>>;
 using AttrNameRegistry = std::unordered_map<std::string, std::unordered_set<std::string>>;
 using AttrTypeRegistry = std::unordered_map<std::string, std::unordered_map<std::string, std::string>>;
 using HeaderSpecRegistry = std::unordered_map<std::string, HeaderSpec>;
+using InferenceRuleRegistry =
+    std::unordered_map<std::string, std::unordered_map<std::string, std::vector<InferenceRule>>>;
 
 class Registry {
 public:
@@ -45,18 +57,25 @@ public:
 
     Registry& register_type(std::string type_name, std::unique_ptr<TypeValidator> validator);
     Registry& register_header(std::string protocol, std::vector<AttrSpec> attrs);
+    Registry& register_inference_rule(std::string parent_header,
+                                      std::string child_header,
+                                      std::string target_field,
+                                      ConstructorValue value);
 
     const TypeRegistry& type_validators() const;
     const AttrNameRegistry& attr_names() const;
     const AttrTypeRegistry& attr_types() const;
     const HeaderSpecRegistry& header_specs() const;
     const HeaderSpec* find_header(std::string_view protocol) const;
+    const std::vector<InferenceRule>* find_inference_rules(std::string_view parent_header,
+                                                           std::string_view child_header) const;
 
 private:
     TypeRegistry type_validators_;
     AttrNameRegistry attr_names_;
     AttrTypeRegistry attr_types_;
     HeaderSpecRegistry header_specs_;
+    InferenceRuleRegistry inference_rules_;
 };
 
 } // namespace packet

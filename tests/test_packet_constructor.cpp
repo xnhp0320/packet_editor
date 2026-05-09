@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -140,6 +141,107 @@ TEST(PacketConstructorTest, VlanOffsetsAndFields) {
     EXPECT_EQ(vlan.fields[1].name, "dei");
     EXPECT_EQ(vlan.fields[2].name, "vlan");
     EXPECT_EQ(vlan.fields[3].name, "type");
+}
+
+TEST(PacketConstructorTest, InfersAdjacentProtocolFields) {
+    auto result = build("Ether()/VLAN()/IP()/UDP()");
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+    ASSERT_EQ(result.packet->size(), 4);
+    EXPECT_TRUE(result.warnings.empty());
+
+    const auto& ether = (*result.packet)[0];
+    const auto& vlan = (*result.packet)[1];
+    const auto& ip = (*result.packet)[2];
+
+    EXPECT_EQ(std::get<uint64_t>(field(ether, "type").value), 0x8100);
+    EXPECT_FALSE(field(ether, "type").explicitly_set);
+    EXPECT_EQ(std::get<uint64_t>(field(vlan, "type").value), 0x0800);
+    EXPECT_FALSE(field(vlan, "type").explicitly_set);
+    EXPECT_EQ(std::get<uint64_t>(field(ip, "proto").value), 17);
+    EXPECT_FALSE(field(ip, "proto").explicitly_set);
+}
+
+TEST(PacketConstructorTest, InfersIpv6NextHeader) {
+    auto result = build("Ether()/IPv6()/TCP()");
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+    ASSERT_EQ(result.packet->size(), 3);
+
+    const auto& ether = (*result.packet)[0];
+    const auto& ipv6 = (*result.packet)[1];
+
+    EXPECT_EQ(std::get<uint64_t>(field(ether, "type").value), 0x86dd);
+    EXPECT_FALSE(field(ether, "type").explicitly_set);
+    EXPECT_EQ(std::get<uint64_t>(field(ipv6, "nh").value), 6);
+    EXPECT_FALSE(field(ipv6, "nh").explicitly_set);
+}
+
+TEST(PacketConstructorTest, ExplicitProtocolFieldOverridesInferenceWithWarning) {
+    auto result = build("Ether(type=0x86dd)/IP()");
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+    ASSERT_EQ(result.packet->size(), 2);
+    ASSERT_EQ(result.warnings.size(), 1);
+    EXPECT_EQ(result.warnings[0], "explicit 'Ether.type' overrides inference from next header 'IP'");
+
+    const auto& ether = (*result.packet)[0];
+    EXPECT_EQ(std::get<uint64_t>(field(ether, "type").value), 0x86dd);
+    EXPECT_TRUE(field(ether, "type").explicitly_set);
+}
+
+TEST(PacketConstructorTest, MatchingExplicitProtocolFieldDoesNotWarn) {
+    auto result = build("Ether(type=0x0800)/IP()");
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+    EXPECT_TRUE(result.warnings.empty());
+
+    const auto& ether = (*result.packet)[0];
+    EXPECT_EQ(std::get<uint64_t>(field(ether, "type").value), 0x0800);
+    EXPECT_TRUE(field(ether, "type").explicitly_set);
+}
+
+TEST(PacketConstructorTest, CustomInferenceRuleUsesAdjacentHeaders) {
+    Registry registry;
+    registry.register_header("Outer", {{"type", "b16"}});
+    registry.register_header("Inner", {{"field", "b8"}});
+    registry.register_inference_rule("Outer", "Inner", "type", ConstructorValue{uint64_t{42}});
+
+    auto result = build("Outer()/Inner()", registry);
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+    ASSERT_EQ(result.packet->size(), 2);
+    EXPECT_EQ(std::get<uint64_t>(field((*result.packet)[0], "type").value), 42);
+    EXPECT_FALSE(field((*result.packet)[0], "type").explicitly_set);
+}
+
+TEST(PacketConstructorTest, InvalidInferenceRuleTargetFailsAtRegistration) {
+    Registry registry;
+    registry.register_header("Outer", {{"type", "b16"}});
+    registry.register_header("Inner", {{"field", "b8"}});
+
+    EXPECT_THROW(registry.register_inference_rule("Outer",
+                                                 "Inner",
+                                                 "unknown",
+                                                 ConstructorValue{uint64_t{42}}),
+                 std::invalid_argument);
+}
+
+TEST(PacketConstructorTest, InvalidInferenceRuleValueFailsAtRegistration) {
+    Registry registry;
+    registry.register_header("Outer", {{"type", "b8"}});
+    registry.register_header("Inner", {{"field", "b8"}});
+
+    EXPECT_THROW(registry.register_inference_rule("Outer",
+                                                 "Inner",
+                                                 "type",
+                                                 ConstructorValue{uint64_t{256}}),
+                 std::invalid_argument);
 }
 
 TEST(PacketConstructorTest, VlanValuesOverrideDefaults) {
