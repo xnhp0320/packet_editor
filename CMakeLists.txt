@@ -136,10 +136,12 @@ endif()
 
 add_library(packet
     src/lexer.cpp
+    src/packet_generator.cpp
     src/parser.cpp
     src/checker.cpp
     src/packet_constructor.cpp
     src/packet_serializer.cpp
+    src/pcap_writer.cpp
     src/registry.cpp
     src/type_validator.cpp
     src/util.cpp
@@ -148,6 +150,8 @@ add_library(packet
 
 target_include_directories(packet PUBLIC include)
 
+add_executable(ffg apps/dpdk_init.cpp)
+
 if(PACKET_BUILD_DPDK)
     add_library(packet_runtime
         src/dpdk_offload.cpp
@@ -155,11 +159,13 @@ if(PACKET_BUILD_DPDK)
     )
     target_link_libraries(packet_runtime PUBLIC packet DPDK::dpdk)
 
-    add_executable(ffg apps/dpdk_init.cpp)
     target_link_libraries(ffg PRIVATE packet_runtime)
+    target_compile_definitions(ffg PRIVATE PACKET_HAVE_DPDK=1)
 
     add_executable(test_runtime tests/test_runtime.cpp)
     target_link_libraries(test_runtime packet_runtime gtest_main)
+else()
+    target_link_libraries(ffg PRIVATE packet)
 endif()
 
 add_executable(test_lexer tests/test_lexer.cpp)
@@ -177,12 +183,16 @@ target_link_libraries(test_packet_constructor packet gtest_main)
 add_executable(test_packet_serializer tests/test_packet_serializer.cpp)
 target_link_libraries(test_packet_serializer packet gtest_main)
 
+add_executable(test_file_mode tests/test_file_mode.cpp)
+target_link_libraries(test_file_mode packet gtest_main)
+
 enable_testing()
 add_test(NAME LexerTest  COMMAND test_lexer)
 add_test(NAME ParserTest COMMAND test_parser)
 add_test(NAME CheckerTest COMMAND test_checker)
 add_test(NAME PacketConstructorTest COMMAND test_packet_constructor)
 add_test(NAME PacketSerializerTest COMMAND test_packet_serializer)
+add_test(NAME FileModeTest COMMAND test_file_mode)
 if(PACKET_BUILD_DPDK)
     add_test(NAME RuntimeTest COMMAND test_runtime)
     if(PACKET_BUILD_E2E_TESTS)

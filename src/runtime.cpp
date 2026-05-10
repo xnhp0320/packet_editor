@@ -1,7 +1,6 @@
 #include "packet/runtime.hpp"
 
-#include "packet/packet_constructor.hpp"
-#include "packet/packet_serializer.hpp"
+#include "packet/packet_generator.hpp"
 
 #include <rte_dev.h>
 #include <rte_eal.h>
@@ -18,7 +17,6 @@
 #include <cstdlib>
 #include <format>
 #include <memory>
-#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -46,7 +44,6 @@ constexpr uint16_t runtime_rx_descriptors = 128;
 constexpr uint16_t runtime_tx_descriptors = 512;
 constexpr unsigned runtime_mbuf_count = 8191;
 constexpr unsigned runtime_mbuf_cache_size = 250;
-constexpr size_t runtime_max_packet_size = 2048;
 constexpr std::string_view runtime_tap_name = "net_tap0";
 constexpr std::string_view runtime_tap_args = "iface=packet_tap0,mac=fixed";
 constexpr std::string_view runtime_tap_iface = "packet_tap0";
@@ -96,16 +93,6 @@ struct MempoolDeleter {
 };
 
 using MempoolPtr = std::unique_ptr<rte_mempool, MempoolDeleter>;
-
-struct RuntimePacket {
-    std::vector<std::byte> base_payload;
-    std::vector<PayloadFieldModifier> modifiers;
-};
-
-struct FlowIndexPlan {
-    uint64_t total_flows = 1;
-    uint64_t planned_packets = 1;
-};
 
 #ifdef __linux__
 class Fd {
@@ -242,85 +229,6 @@ bool configure_and_start_port(uint16_t port_id, rte_mempool& mbuf_pool, Runtime:
     return true;
 }
 
-std::optional<PacketConstructor> build_packet_constructor(const Packet& packet,
-                                                          const Registry& registry,
-                                                          Runtime::Result& result) {
-    PacketConstructorBuilder builder{registry};
-    auto constructor = builder.build(packet);
-    result.warnings.insert(result.warnings.end(), constructor.warnings.begin(), constructor.warnings.end());
-    result.errors.insert(result.errors.end(), constructor.errors.begin(), constructor.errors.end());
-    if (!constructor.ok || !constructor.packet) {
-        return std::nullopt;
-    }
-    return std::move(*constructor.packet);
-}
-
-std::optional<RuntimePacket> serialize_runtime_packet(const PacketConstructor& packet,
-                                                      const Registry& registry,
-                                                      Runtime::Result& result) {
-    std::vector<std::byte> payload(runtime_max_packet_size);
-    auto serialized = serialize_packet(packet, registry, PacketBufferView{payload});
-    result.errors.insert(result.errors.end(), serialized.errors.begin(), serialized.errors.end());
-    if (!serialized.ok) {
-        return std::nullopt;
-    }
-
-    auto fixed = fixup_packet(packet, registry, PacketBufferView{payload}, serialized.packet_len);
-    result.errors.insert(result.errors.end(), fixed.errors.begin(), fixed.errors.end());
-    if (!fixed.ok) {
-        return std::nullopt;
-    }
-
-    payload.resize(serialized.packet_len);
-    result.packet_len = serialized.packet_len;
-    return RuntimePacket{
-        std::move(payload),
-        std::move(serialized.modifiers),
-    };
-}
-
-std::optional<FlowIndexPlan> plan_flow_indexes(const std::vector<PayloadFieldModifier>& modifiers,
-                                               std::optional<uint64_t> packet_count,
-                                               Runtime::Result& result) {
-    FlowIndexPlan plan;
-    for (const auto& modifier : modifiers) {
-        if (modifier.value_count == 0) {
-            result.errors.push_back(std::format("modifier '{}.{}' has zero values",
-                                                modifier.protocol,
-                                                modifier.field));
-            return std::nullopt;
-        }
-        if (plan.total_flows > std::numeric_limits<uint64_t>::max() / modifier.value_count) {
-            result.errors.push_back("range expansion has more than 18446744073709551615 flows");
-            return std::nullopt;
-        }
-        plan.total_flows *= modifier.value_count;
-    }
-
-    plan.planned_packets = packet_count ? std::min(plan.total_flows, *packet_count)
-                                        : plan.total_flows;
-    result.total_flows = plan.total_flows;
-    result.planned_packets = plan.planned_packets;
-    return plan;
-}
-
-bool apply_flow_index(std::span<std::byte> payload,
-                      const std::vector<PayloadFieldModifier>& modifiers,
-                      uint64_t flow_index,
-                      Runtime::Result& result) {
-    uint64_t divisor = 1;
-    for (const auto& modifier : modifiers) {
-        const auto value_index = (flow_index / divisor) % modifier.value_count;
-        std::string error;
-        if (!modifier.apply(payload, value_index, error)) {
-            result.errors.push_back(std::move(error));
-            return false;
-        }
-        divisor *= modifier.value_count;
-    }
-    return true;
-}
-
 bool transmit_packet(uint16_t port_id,
                      rte_mempool& mbuf_pool,
                      std::span<const std::byte> payload,
@@ -355,20 +263,12 @@ bool transmit_packet(uint16_t port_id,
 
 bool transmit_planned_packets(uint16_t port_id,
                               rte_mempool& mbuf_pool,
-                              const PacketConstructor& packet,
-                              const Registry& registry,
-                              const RuntimePacket& runtime_packet,
-                              const FlowIndexPlan& plan,
+                              const PacketGenerator& generator,
+                              const GeneratedPacket& generated_packet,
                               Runtime::Result& result) {
-    for (uint64_t flow_index = 0; flow_index < plan.planned_packets; ++flow_index) {
-        auto payload = runtime_packet.base_payload;
-        if (!apply_flow_index(payload, runtime_packet.modifiers, flow_index, result)) {
-            return false;
-        }
-
-        auto fixed = fixup_packet(packet, registry, PacketBufferView{payload}, result.packet_len);
-        result.errors.insert(result.errors.end(), fixed.errors.begin(), fixed.errors.end());
-        if (!fixed.ok) {
+    for (uint64_t flow_index = 0; flow_index < generated_packet.flow_plan.planned_packets; ++flow_index) {
+        std::vector<std::byte> payload;
+        if (!generator.payload_for_flow(generated_packet, flow_index, payload, result.errors)) {
             return false;
         }
 
@@ -584,28 +484,22 @@ std::optional<Runtime::Config> Runtime::checked_config(const Program& program, R
 
 Runtime::Result Runtime::check(const Program& program) const {
     Result result;
-    auto config = checked_config(program, result);
+    auto config = build_config(program, result);
     if (!config) {
         return result;
     }
 
-    auto packet = build_packet_constructor(config->packet, registry_, result);
-    if (!packet) {
-        result.ok = false;
+    PacketGenerator generator{registry_};
+    auto generated = generator.prepare(config->packet, config->packet_count);
+    result.warnings.insert(result.warnings.end(), generated.warnings.begin(), generated.warnings.end());
+    result.errors.insert(result.errors.end(), generated.errors.begin(), generated.errors.end());
+    if (!generated.ok || !generated.packet) {
         return result;
     }
 
-    auto runtime_packet = serialize_runtime_packet(*packet, registry_, result);
-    if (!runtime_packet) {
-        result.ok = false;
-        return result;
-    }
-
-    if (!plan_flow_indexes(runtime_packet->modifiers, config->packet_count, result)) {
-        result.ok = false;
-        return result;
-    }
-
+    result.packet_len = generated.packet->packet_len;
+    result.total_flows = generated.packet->flow_plan.total_flows;
+    result.planned_packets = generated.packet->flow_plan.planned_packets;
     result.ok = true;
     return result;
 }
@@ -628,28 +522,21 @@ Runtime::Result Runtime::init(const Program& program, std::string_view eal_progr
 
 Runtime::Result Runtime::run(const Program& program, std::string_view eal_program_name) {
     Result result;
-    auto config = checked_config(program, result);
+    auto config = build_config(program, result);
     if (!config) {
         return result;
     }
 
-    auto packet = build_packet_constructor(config->packet, registry_, result);
-    if (!packet) {
-        result.ok = false;
+    PacketGenerator generator{registry_};
+    auto generated = generator.prepare(config->packet, config->packet_count);
+    result.warnings.insert(result.warnings.end(), generated.warnings.begin(), generated.warnings.end());
+    result.errors.insert(result.errors.end(), generated.errors.begin(), generated.errors.end());
+    if (!generated.ok || !generated.packet) {
         return result;
     }
-
-    auto runtime_packet = serialize_runtime_packet(*packet, registry_, result);
-    if (!runtime_packet) {
-        result.ok = false;
-        return result;
-    }
-
-    auto flow_plan = plan_flow_indexes(runtime_packet->modifiers, config->packet_count, result);
-    if (!flow_plan) {
-        result.ok = false;
-        return result;
-    }
+    result.packet_len = generated.packet->packet_len;
+    result.total_flows = generated.packet->flow_plan.total_flows;
+    result.planned_packets = generated.packet->flow_plan.planned_packets;
 
     if (!check_tap_permission(result)) {
         result.ok = false;
@@ -670,10 +557,8 @@ Runtime::Result Runtime::run(const Program& program, std::string_view eal_progra
         apply_transmit_delay(result);
         transmit_planned_packets(runtime_port_id,
                                  *mbuf_pool,
-                                 *packet,
-                                 registry_,
-                                 *runtime_packet,
-                                 *flow_plan,
+                                 generator,
+                                 *generated.packet,
                                  result);
     }
 
