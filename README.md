@@ -1,0 +1,132 @@
+# FlowForge
+
+FlowForge is a DPDK-native traffic generator driven by a compact, Scapy-like
+packet description language. It is built for generating high-rate packet streams
+from readable packet programs, including range expressions that expand one packet
+template into a set of flows.
+
+The repository and CMake project are currently named `packet_editor`; FlowForge
+is the proposed product/project name.
+
+## Features
+
+- Scapy-like packet construction syntax:
+
+  ```text
+  Ether()/IP(src="192.168.0.1",dst="192.168.0.2")/UDP(sport=1234,dport=5678)
+  ```
+
+- Flow ranges for traffic generation:
+
+  ```text
+  IP(src="[10.0.0.1-10.0.0.4]")/TCP(sport="[10000-10002]",dport=443)
+  ```
+
+  The runtime expands packet field ranges as a Cartesian product and transmits
+  each planned flow once unless `PACKET_COUNT` caps the run.
+
+- DPDK-native runtime path for high-performance packet generation.
+- Protocol support for Ethernet, VLAN, IPv4, IPv6, TCP, UDP, ICMP, VXLAN,
+  payload sizing, IPv4 options, and TCP options.
+- Packet validation and serialization are separated from the DPDK runtime, so
+  most parser/checker/serializer behavior is covered by fast unit tests.
+- Optional pytest + Scapy end-to-end tests validate real packets emitted through
+  the DPDK tap runtime.
+
+## Packet Programs
+
+A runtime program is a small text file with variables:
+
+```text
+DPDK_ARGS: "--no-huge --no-pci -l 0"
+PACKET_COUNT: 12
+PACKET: Ether(dst="ff:ff:ff:ff:ff:ff",src="02:64:74:61:70:00")/IP(src="[10.0.0.1-10.0.0.4]",dst="10.0.1.1")/TCP(sport="[10000-10002]",dport=443)
+```
+
+Supported runtime variables:
+
+- `DPDK_ARGS`: string passed to DPDK EAL initialization.
+- `PACKET`: packet expression to validate, serialize, and transmit.
+- `PACKET_COUNT`: optional positive integer cap for the number of generated
+  packets.
+
+Ranges are accepted for IPv4/IPv6 address fields and range-capable integer
+fields such as TCP/UDP ports.
+
+## Build
+
+FlowForge uses CMake and C++20. By default, the build downloads and builds the
+bundled DPDK release.
+
+Typical Linux dependencies include:
+
+- CMake 3.20+
+- a C++20 compiler
+- Meson
+- Git
+- `pkg-config` or `pkgconf`
+- Python 3 with `pyelftools`
+- `libnuma` development headers
+
+Build:
+
+```sh
+cmake -S . -B build
+cmake --build build -j2
+```
+
+To build only the parser/checker/serializer library and unit tests without DPDK:
+
+```sh
+cmake -S . -B build -DPACKET_BUILD_DPDK=OFF
+cmake --build build -j2
+```
+
+## Run
+
+Run a packet program with the DPDK tap runtime:
+
+```sh
+./build/packet_tap_runtime examples/tap_runtime.packet
+```
+
+The current tap runtime creates the tap interface `packet_tap0`. Creating and
+capturing from tap interfaces generally requires root or equivalent network
+capabilities.
+
+Example output:
+
+```text
+DPDK runtime completed; rte_eal_init parsed ... argument(s), port 0 sent 3/3 packet(s), planned 3 of 3 flow(s), packet_len 42 bytes
+```
+
+## Test
+
+Run the C++ unit tests:
+
+```sh
+ctest --test-dir build --output-on-failure
+```
+
+The end-to-end tests are opt-in because they require Linux tap support, Scapy,
+and root or equivalent network capabilities. They create a Python virtual
+environment under the build directory and install the e2e requirements there.
+
+```sh
+cmake -S . -B build -DPACKET_BUILD_E2E_TESTS=ON
+cmake --build build -j2
+ctest --test-dir build -R E2ETest --output-on-failure
+```
+
+The e2e suite launches `packet_tap_runtime`, captures packets from `packet_tap0`
+with Scapy, reloads Scapy's interface cache between runs, and validates normal
+IPv4 TCP/UDP/ICMP packets, VXLAN encapsulation, IP/TCP options, and flow range
+expansion.
+
+## Project Layout
+
+- `include/packet/`: public C++ headers.
+- `src/`: parser, checker, constructor, serializer, registry, and runtime code.
+- `apps/`: runtime command-line entrypoints.
+- `tests/`: C++ unit tests and pytest/Scapy e2e tests.
+- `examples/`: sample packet programs.
