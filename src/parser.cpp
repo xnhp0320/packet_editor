@@ -120,27 +120,11 @@ std::optional<Attribute> Parser::parse_attribute() {
     if (lexer_.peek().type == TokenType::Equal) {
         lexer_.next();
 
-        Token val_tok = lexer_.peek();
-        if (val_tok.type == TokenType::StringLiteral) {
-            lexer_.next();
-            auto val = parse_string_value(val_tok.lexeme);
-            if (!val) {
-                error_ = "invalid string escape sequence";
-                return std::nullopt;
-            }
-            attr.value = std::move(val);
-        } else if (val_tok.type == TokenType::IntegerLiteral) {
-            lexer_.next();
-            auto val = parse_number_value(val_tok.lexeme);
-            if (!val) {
-                error_ = "invalid integer literal";
-                return std::nullopt;
-            }
-            attr.value = std::move(val);
-        } else {
-            error_ = "expected string or integer value";
+        auto expression = parse_expression();
+        if (!expression) {
             return std::nullopt;
         }
+        attr.value = make_attribute_value(std::move(*expression));
     }
 
     return attr;
@@ -170,6 +154,17 @@ std::optional<ValueType> Parser::parse_value() {
 
     error_ = "expected string or integer value";
     return std::nullopt;
+}
+
+std::optional<Expression> Parser::scalar_value_to_expression(ValueType value) {
+    return std::visit([](auto&& v) -> Expression {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, std::string>) {
+            return StringExpression{std::move(v)};
+        } else {
+            return IntegerExpression{v};
+        }
+    }, std::move(value));
 }
 
 std::optional<Header> Parser::parse_header() {
@@ -236,14 +231,7 @@ std::optional<Expression> Parser::parse_expression() {
         if (!value) {
             return std::nullopt;
         }
-        return std::visit([](auto&& v) -> Expression {
-            using T = std::decay_t<decltype(v)>;
-            if constexpr (std::is_same_v<T, std::string>) {
-                return StringExpression{std::move(v)};
-            } else {
-                return IntegerExpression{v};
-            }
-        }, std::move(*value));
+        return scalar_value_to_expression(std::move(*value));
     }
 
     auto packet = parse_packet_expression();

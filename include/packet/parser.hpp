@@ -29,6 +29,7 @@ private:
     std::optional<Header> parse_header();
     std::optional<Attribute> parse_attribute();
     std::optional<ValueType> parse_value();
+    std::optional<Expression> scalar_value_to_expression(ValueType value);
     std::optional<ValueType> parse_string_value(std::string_view raw);
     std::optional<ValueType> parse_number_value(std::string_view raw);
 };

@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -48,6 +50,18 @@ const OptionConstructor& option(const HeaderConstructor& header, std::string_vie
     });
     EXPECT_NE(it, header.options.end());
     return *it;
+}
+
+const ConstructorValue& scalar_option(const HeaderConstructor& header, std::string_view name) {
+    const auto& value = option(header, name).value;
+    EXPECT_TRUE(std::holds_alternative<ConstructorValue>(value));
+    return std::get<ConstructorValue>(value);
+}
+
+const PacketConstructor& packet_option(const HeaderConstructor& header, std::string_view name) {
+    const auto& value = option(header, name).value;
+    EXPECT_TRUE(std::holds_alternative<std::shared_ptr<PacketConstructor>>(value));
+    return *std::get<std::shared_ptr<PacketConstructor>>(value);
 }
 
 } // namespace
@@ -287,8 +301,57 @@ TEST(PacketConstructorTest, VxlanDefaultsAndValues) {
     EXPECT_EQ(vxlan.fields[3].name, "reserved2");
     EXPECT_EQ(std::get<uint64_t>(field(vxlan, "flags").value), 0x08);
     EXPECT_EQ(std::get<uint64_t>(field(vxlan, "vni").value), 100);
+    EXPECT_EQ(std::get<uint64_t>(field((*result.packet)[0], "dport").value), 4789);
+    EXPECT_FALSE(field((*result.packet)[0], "dport").explicitly_set);
     EXPECT_FALSE(field(vxlan, "flags").explicitly_set);
     EXPECT_TRUE(field(vxlan, "vni").explicitly_set);
+}
+
+TEST(PacketConstructorTest, PayloadLengthAdvancesFollowingHeaderOffset) {
+    auto result = build("Ether()/Payload(length=32)/UDP()");
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+    ASSERT_EQ(result.packet->size(), 3);
+
+    const auto& payload = (*result.packet)[1];
+    EXPECT_EQ(payload.protocol, "Payload");
+    EXPECT_EQ(payload.offset, 14);
+    EXPECT_TRUE(payload.fields.empty());
+    ASSERT_EQ(payload.options.size(), 1);
+    EXPECT_EQ(std::get<uint64_t>(scalar_option(payload, "length")), 32);
+    EXPECT_TRUE(option(payload, "length").explicitly_set);
+    EXPECT_EQ((*result.packet)[2].offset, 46);
+}
+
+TEST(PacketConstructorTest, PayloadTotalLengthCalculatesPayloadLength) {
+    auto result = build("Ether()/IP()/Payload(total_length=100)");
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+
+    const auto& payload = (*result.packet)[2];
+    EXPECT_EQ(payload.offset, 34);
+    EXPECT_EQ(std::get<uint64_t>(scalar_option(payload, "length")), 66);
+    EXPECT_FALSE(option(payload, "length").explicitly_set);
+    EXPECT_EQ(std::get<uint64_t>(scalar_option(payload, "total_length")), 100);
+    EXPECT_TRUE(option(payload, "total_length").explicitly_set);
+}
+
+TEST(PacketConstructorTest, PayloadTotalLengthRejectsTooSmallPacket) {
+    auto result = build("Ether()/IP()/Payload(total_length=20)");
+
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.errors.size(), 1);
+    EXPECT_NE(result.errors[0].find("smaller than preceding header length 34"), std::string::npos);
+}
+
+TEST(PacketConstructorTest, PayloadRejectsConflictingLengthOptions) {
+    auto result = build("Ether()/Payload(length=10,total_length=64)");
+
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.errors.size(), 1);
+    EXPECT_NE(result.errors[0].find("cannot both be explicitly set"), std::string::npos);
 }
 
 TEST(PacketConstructorTest, UnknownHeaderFails) {
@@ -378,7 +441,7 @@ TEST(PacketConstructorTest, OptionsAreConstructedButNotSerializedFields) {
     const auto& payload = (*result.packet)[0];
     EXPECT_TRUE(payload.fields.empty());
     ASSERT_EQ(payload.options.size(), 1);
-    EXPECT_EQ(std::get<uint64_t>(option(payload, "length").value), 100);
+    EXPECT_EQ(std::get<uint64_t>(scalar_option(payload, "length")), 100);
     EXPECT_TRUE(option(payload, "length").explicitly_set);
 }
 
@@ -396,8 +459,57 @@ TEST(PacketConstructorTest, OptionsUseDefaults) {
     const auto& payload = (*result.packet)[0];
     EXPECT_TRUE(payload.fields.empty());
     ASSERT_EQ(payload.options.size(), 1);
-    EXPECT_EQ(std::get<uint64_t>(option(payload, "length").value), 64);
+    EXPECT_EQ(std::get<uint64_t>(scalar_option(payload, "length")), 64);
     EXPECT_FALSE(option(payload, "length").explicitly_set);
+}
+
+TEST(PacketConstructorTest, PacketValuedOptionsConstructNestedPacket) {
+    Registry registry;
+    registry.register_header("Outer", {{"field", "b8"}}, {
+        {"children", "", std::nullopt, AttrValueKind::Packet},
+    });
+    registry.register_header("InnerA", {{"a", "b8"}});
+    registry.register_header("InnerB", {{"b", "b16"}});
+
+    auto result = build("Outer(children=InnerA(a=1)/InnerB(b=2))", registry);
+
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+    const auto& outer = (*result.packet)[0];
+    ASSERT_EQ(outer.options.size(), 1);
+    EXPECT_TRUE(option(outer, "children").explicitly_set);
+
+    const auto& children = packet_option(outer, "children");
+    ASSERT_EQ(children.size(), 2);
+    EXPECT_EQ(children[0].protocol, "InnerA");
+    EXPECT_EQ(std::get<uint64_t>(field(children[0], "a").value), 1);
+    EXPECT_EQ(children[1].protocol, "InnerB");
+    EXPECT_EQ(std::get<uint64_t>(field(children[1], "b").value), 2);
+}
+
+TEST(PacketConstructorTest, PacketValuedOptionRejectsScalarValue) {
+    Registry registry;
+    registry.register_header("Outer", {}, {
+        {"children", "", std::nullopt, AttrValueKind::Packet},
+    });
+
+    auto result = build("Outer(children=1)", registry);
+
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.errors.size(), 1);
+    EXPECT_NE(result.errors[0].find("requires a packet value"), std::string::npos);
+}
+
+TEST(PacketConstructorTest, ScalarFieldRejectsPacketValue) {
+    Registry registry;
+    registry.register_header("Outer", {{"field", "b8"}});
+    registry.register_header("Inner", {{"value", "b8"}});
+
+    auto result = build("Outer(field=Inner(value=1))", registry);
+
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.errors.size(), 1);
+    EXPECT_NE(result.errors[0].find("requires a scalar value"), std::string::npos);
 }
 
 TEST(PacketConstructorTest, BitRangesPreserveScalarSyntaxAsUInt64) {

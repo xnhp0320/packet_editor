@@ -139,6 +139,8 @@ Registry::Registry() {
         {"chksum",  "b16"},
         {"src",     "ipv4_ranges"},
         {"dst",     "ipv4_ranges"},
+    }, {
+        {"options", "", std::nullopt, AttrValueKind::Packet},
     });
 
     register_header("IPv6", {
@@ -163,6 +165,8 @@ Registry::Registry() {
         {"window",   "b16"},
         {"chksum",   "b16"},
         {"urgptr",   "b16"},
+    }, {
+        {"options", "", std::nullopt, AttrValueKind::Packet},
     });
 
     register_header("UDP", {
@@ -194,6 +198,44 @@ Registry::Registry() {
         {"reserved2", "b8"},
     });
 
+    register_header("Payload", {}, {
+        {"length",       "b64", ConstructorValue{uint64_t{0}}},
+        {"total_length", "b64"},
+    });
+
+    register_header("IPOption_EOL", {
+        {"type", "b8", ConstructorValue{uint64_t{0}}},
+    });
+    register_header("IPOption_NOP", {
+        {"type", "b8", ConstructorValue{uint64_t{1}}},
+    });
+    register_header("TCPOption_EOL", {
+        {"kind", "b8", ConstructorValue{uint64_t{0}}},
+    });
+    register_header("TCPOption_NOP", {
+        {"kind", "b8", ConstructorValue{uint64_t{1}}},
+    });
+    register_header("TCPOption_MSS", {
+        {"kind",   "b8",  ConstructorValue{uint64_t{2}}},
+        {"length", "b8",  ConstructorValue{uint64_t{4}}},
+        {"value",  "b16"},
+    });
+    register_header("TCPOption_WS", {
+        {"kind",   "b8", ConstructorValue{uint64_t{3}}},
+        {"length", "b8", ConstructorValue{uint64_t{3}}},
+        {"shift",  "b8"},
+    });
+    register_header("TCPOption_SACKPermitted", {
+        {"kind",   "b8", ConstructorValue{uint64_t{4}}},
+        {"length", "b8", ConstructorValue{uint64_t{2}}},
+    });
+    register_header("TCPOption_Timestamp", {
+        {"kind",    "b8",  ConstructorValue{uint64_t{8}}},
+        {"length",  "b8",  ConstructorValue{uint64_t{10}}},
+        {"tsval",   "b32"},
+        {"tsecr",   "b32"},
+    });
+
     register_inference_rule("Ether", "IP", "type", ConstructorValue{uint64_t{0x0800}});
     register_inference_rule("Ether", "IPv6", "type", ConstructorValue{uint64_t{0x86dd}});
     register_inference_rule("Ether", "VLAN", "type", ConstructorValue{uint64_t{0x8100}});
@@ -205,6 +247,7 @@ Registry::Registry() {
     register_inference_rule("IPv6", "TCP", "nh", ConstructorValue{uint64_t{6}});
     register_inference_rule("IPv6", "UDP", "nh", ConstructorValue{uint64_t{17}});
     register_inference_rule("IPv6", "ICMP", "nh", ConstructorValue{uint64_t{58}});
+    register_inference_rule("UDP", "VXLAN", "dport", ConstructorValue{uint64_t{4789}});
 }
 
 Registry& Registry::register_type(std::string type_name, std::unique_ptr<TypeValidator> validator) {
@@ -242,13 +285,21 @@ Registry& Registry::register_header(std::string protocol,
     }
     for (auto& attr : options) {
         names.insert(attr.name);
-        types[attr.name] = attr.type_name;
+        if (attr.value_kind == AttrValueKind::Scalar) {
+            types[attr.name] = attr.type_name;
+        }
         auto option = OptionSpec{
             attr.name,
             attr.type_name,
+            attr.value_kind,
             attr.default_value,
         };
-        if (option.default_value) {
+        if (option.value_kind == AttrValueKind::Packet && option.default_value) {
+            throw std::invalid_argument(std::format("packet option '{}.{}' cannot have scalar default value",
+                                                    protocol,
+                                                    option.name));
+        }
+        if (option.value_kind == AttrValueKind::Scalar && option.default_value) {
             if (auto error = validate_constructor_value(option.name,
                                                         option.type_name,
                                                         *option.default_value)) {

@@ -5,6 +5,15 @@
 
 using namespace packet;
 
+namespace {
+
+ExpressionValue attr_value(const Attribute& attr) {
+    EXPECT_TRUE(attr.value.has_value());
+    return evaluate(**attr.value);
+}
+
+} // namespace
+
 TEST(ParserTest, SingleHeaderNoAttrs) {
     Parser parser("Ether");
     auto pkt = parser.parse_packet();
@@ -25,14 +34,16 @@ TEST(ParserTest, SingleHeaderWithAttrs) {
     auto& a0 = (*pkt)[0].attributes[0];
     EXPECT_EQ(a0.name, "dst");
     ASSERT_TRUE(a0.value.has_value());
-    EXPECT_TRUE(std::holds_alternative<std::string>(*a0.value));
-    EXPECT_EQ(std::get<std::string>(*a0.value), "ff:ff:ff:ff:ff:ff");
+    auto a0_value = attr_value(a0);
+    EXPECT_TRUE(std::holds_alternative<std::string>(a0_value));
+    EXPECT_EQ(std::get<std::string>(a0_value), "ff:ff:ff:ff:ff:ff");
 
     auto& a1 = (*pkt)[0].attributes[1];
     EXPECT_EQ(a1.name, "src");
     ASSERT_TRUE(a1.value.has_value());
-    EXPECT_TRUE(std::holds_alternative<std::string>(*a1.value));
-    EXPECT_EQ(std::get<std::string>(*a1.value), "00:11:22:33:44:55");
+    auto a1_value = attr_value(a1);
+    EXPECT_TRUE(std::holds_alternative<std::string>(a1_value));
+    EXPECT_EQ(std::get<std::string>(a1_value), "00:11:22:33:44:55");
 }
 
 TEST(ParserTest, ScapyStyle) {
@@ -44,19 +55,19 @@ TEST(ParserTest, ScapyStyle) {
     EXPECT_EQ((*pkt)[0].protocol, "Ether");
     EXPECT_EQ((*pkt)[0].attributes.size(), 1);
     EXPECT_EQ((*pkt)[0].attributes[0].name, "dst");
-    EXPECT_EQ(std::get<std::string>(*(*pkt)[0].attributes[0].value), "ff:ff:ff:ff:ff:ff");
+    EXPECT_EQ(std::get<std::string>(attr_value((*pkt)[0].attributes[0])), "ff:ff:ff:ff:ff:ff");
 
     EXPECT_EQ((*pkt)[1].protocol, "IP");
     EXPECT_EQ((*pkt)[1].attributes.size(), 2);
     EXPECT_EQ((*pkt)[1].attributes[0].name, "src");
-    EXPECT_EQ(std::get<std::string>(*(*pkt)[1].attributes[0].value), "192.168.1.1");
+    EXPECT_EQ(std::get<std::string>(attr_value((*pkt)[1].attributes[0])), "192.168.1.1");
     EXPECT_EQ((*pkt)[1].attributes[1].name, "dst");
-    EXPECT_EQ(std::get<std::string>(*(*pkt)[1].attributes[1].value), "10.0.0.1");
+    EXPECT_EQ(std::get<std::string>(attr_value((*pkt)[1].attributes[1])), "10.0.0.1");
 
     EXPECT_EQ((*pkt)[2].protocol, "TCP");
     EXPECT_EQ((*pkt)[2].attributes.size(), 1);
     EXPECT_EQ((*pkt)[2].attributes[0].name, "dport");
-    EXPECT_EQ(std::get<int64_t>(*(*pkt)[2].attributes[0].value), 80);
+    EXPECT_EQ(std::get<int64_t>(attr_value((*pkt)[2].attributes[0])), 80);
 }
 
 TEST(ParserTest, HexNumber) {
@@ -64,7 +75,7 @@ TEST(ParserTest, HexNumber) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
     EXPECT_EQ(pkt->size(), 1);
-    EXPECT_EQ(std::get<int64_t>(*(*pkt)[0].attributes[0].value), 255);
+    EXPECT_EQ(std::get<int64_t>(attr_value((*pkt)[0].attributes[0])), 255);
 }
 
 TEST(ParserTest, BinaryNumber) {
@@ -72,7 +83,7 @@ TEST(ParserTest, BinaryNumber) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
     EXPECT_EQ(pkt->size(), 1);
-    EXPECT_EQ(std::get<int64_t>(*(*pkt)[0].attributes[0].value), 42);
+    EXPECT_EQ(std::get<int64_t>(attr_value((*pkt)[0].attributes[0])), 42);
 }
 
 TEST(ParserTest, StringEscape) {
@@ -80,7 +91,7 @@ TEST(ParserTest, StringEscape) {
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
     EXPECT_EQ(pkt->size(), 1);
-    auto val = std::get<std::string>(*(*pkt)[0].attributes[0].value);
+    auto val = std::get<std::string>(attr_value((*pkt)[0].attributes[0]));
     EXPECT_EQ(val, "line1\nline2\ttabbed");
 }
 
@@ -155,6 +166,23 @@ TEST(ParserTest, PacketExpression) {
     EXPECT_EQ(pkt[1].protocol, "TCP");
 }
 
+TEST(ParserTest, AttributeCanTakePacketExpression) {
+    Parser parser("HeaderA(X=HeaderB()/HeaderC(),D=1)");
+    auto pkt = parser.parse_packet();
+    ASSERT_TRUE(pkt.has_value()) << parser.last_error();
+    ASSERT_EQ(pkt->size(), 1);
+    ASSERT_EQ((*pkt)[0].attributes.size(), 2);
+
+    auto x_value = attr_value((*pkt)[0].attributes[0]);
+    ASSERT_TRUE(std::holds_alternative<Packet>(x_value));
+    const auto& nested = std::get<Packet>(x_value);
+    ASSERT_EQ(nested.size(), 2);
+    EXPECT_EQ(nested[0].protocol, "HeaderB");
+    EXPECT_EQ(nested[1].protocol, "HeaderC");
+
+    EXPECT_EQ(std::get<int64_t>(attr_value((*pkt)[0].attributes[1])), 1);
+}
+
 TEST(ParserTest, VariableDefinition) {
     Parser parser("XXX: 1");
     auto variable = parser.parse_variable();
@@ -180,7 +208,7 @@ PACKET: IP(src="192.168.0.1")/TCP(dport=80))");
     const auto& pkt = std::get<Packet>(packet_value);
     ASSERT_EQ(pkt.size(), 2);
     EXPECT_EQ(pkt[0].protocol, "IP");
-    EXPECT_EQ(std::get<std::string>(*pkt[0].attributes[0].value), "192.168.0.1");
+    EXPECT_EQ(std::get<std::string>(attr_value(pkt[0].attributes[0])), "192.168.0.1");
 }
 
 TEST(ParserTest, InvalidInput) {
@@ -202,5 +230,5 @@ TEST(ParserTest, OperatorSlash) {
     auto pkt2 = pkt / tcp;
     EXPECT_EQ(pkt2.size(), 3);
     EXPECT_EQ(pkt2[2].protocol, "TCP");
-    EXPECT_EQ(std::get<int64_t>(*pkt2[2].attributes[0].value), 80);
+    EXPECT_EQ(std::get<int64_t>(attr_value(pkt2[2].attributes[0])), 80);
 }

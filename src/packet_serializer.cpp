@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <format>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -43,6 +44,37 @@ const FieldSpec* find_field_spec(const HeaderSpec& header, std::string_view name
         return field.name == name;
     });
     return it == header.fields.end() ? nullptr : &*it;
+}
+
+const OptionConstructor* find_option(const HeaderConstructor& header, std::string_view name) {
+    auto it = std::ranges::find_if(header.options, [name](const OptionConstructor& option) {
+        return option.name == name;
+    });
+    return it == header.options.end() ? nullptr : &*it;
+}
+
+const ConstructorValue* scalar_option_value(const OptionConstructor& option) {
+    if (!std::holds_alternative<ConstructorValue>(option.value)) {
+        return nullptr;
+    }
+    return &std::get<ConstructorValue>(option.value);
+}
+
+size_t payload_bit_width(const HeaderConstructor& header) {
+    if (header.protocol != "Payload") {
+        return 0;
+    }
+
+    const auto* length = find_option(header, "length");
+    const auto* value = length ? scalar_option_value(*length) : nullptr;
+    if (!value || !std::holds_alternative<uint64_t>(*value)) {
+        return 0;
+    }
+    const auto length_bytes = std::get<uint64_t>(*value);
+    if (length_bytes > std::numeric_limits<size_t>::max() / 8) {
+        return std::numeric_limits<size_t>::max();
+    }
+    return static_cast<size_t>(length_bytes) * 8;
 }
 
 void write_bit(std::span<std::byte> payload, size_t bit_offset, bool bit) {
@@ -409,14 +441,77 @@ bool serialize_field(const FieldSpec& spec,
     return true;
 }
 
+size_t packet_bit_width(const PacketConstructor& packet, const Registry& registry);
+
+size_t packet_option_bit_width(const OptionConstructor& option, const Registry& registry) {
+    if (!std::holds_alternative<std::shared_ptr<PacketConstructor>>(option.value)) {
+        return 0;
+    }
+    const auto& packet = *std::get<std::shared_ptr<PacketConstructor>>(option.value);
+    const auto bit_width = packet_bit_width(packet, registry);
+    return ((bit_width + 31) / 32) * 32;
+}
+
+size_t header_option_bit_width(const HeaderConstructor& header, const Registry& registry) {
+    if (header.protocol != "IP" && header.protocol != "TCP") {
+        return 0;
+    }
+    const auto* options = find_option(header, "options");
+    return options ? packet_option_bit_width(*options, registry) : 0;
+}
+
 size_t packet_bit_width(const PacketConstructor& packet, const Registry& registry) {
     size_t bit_width = 0;
     for (const auto& header : packet) {
         if (const auto* spec = registry.find_header(header.protocol)) {
-            bit_width = std::max(bit_width, header.offset * 8 + spec->bit_width);
+            bit_width = std::max(bit_width,
+                                 header.offset * 8 + spec->bit_width +
+                                     header_option_bit_width(header, registry) +
+                                     payload_bit_width(header));
         }
     }
     return bit_width;
+}
+
+void serialize_option_packet(const HeaderConstructor& parent,
+                             const OptionConstructor& option,
+                             const Registry& registry,
+                             size_t start_bit_offset,
+                             std::span<std::byte> payload,
+                             std::vector<std::string>& errors) {
+    if (parent.protocol != "IP" && parent.protocol != "TCP") {
+        errors.push_back(std::format("packet-valued option '{}.{}' is not serializable",
+                                     parent.protocol,
+                                     option.name));
+        return;
+    }
+    if (!std::holds_alternative<std::shared_ptr<PacketConstructor>>(option.value)) {
+        return;
+    }
+
+    const auto& option_packet = *std::get<std::shared_ptr<PacketConstructor>>(option.value);
+    for (const auto& header : option_packet) {
+        const auto* header_spec = registry.find_header(header.protocol);
+        if (!header_spec) {
+            errors.push_back(std::format("unknown option header: '{}'", header.protocol));
+            continue;
+        }
+
+        for (const auto& field : header.fields) {
+            const auto* spec = find_field_spec(*header_spec, field.name);
+            if (!spec) {
+                errors.push_back(std::format("unknown field '{}' in option header '{}'",
+                                             field.name,
+                                             header.protocol));
+                continue;
+            }
+            serialize_field(*spec,
+                            field,
+                            start_bit_offset + header.offset * 8 + spec->bit_offset,
+                            payload,
+                            errors);
+        }
+    }
 }
 
 void set_l4_checksum_for_offload(std::span<std::byte> payload,
@@ -532,6 +627,17 @@ SerializeResult serialize_packet(const PacketConstructor& packet,
                 if (auto modifier = make_modifier(header, *spec, field, bit_offset, result.errors)) {
                     result.modifiers.push_back(std::move(*modifier));
                 }
+            }
+        }
+
+        for (const auto& option : header.options) {
+            if (std::holds_alternative<std::shared_ptr<PacketConstructor>>(option.value)) {
+                serialize_option_packet(header,
+                                        option,
+                                        registry,
+                                        header.offset * 8 + header_spec->bit_width,
+                                        output.payload,
+                                        result.errors);
             }
         }
     }

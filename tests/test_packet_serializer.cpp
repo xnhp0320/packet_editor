@@ -146,6 +146,76 @@ TEST(PacketSerializerTest, RejectsSmallOutputBuffer) {
     EXPECT_NE(result.errors[0].find("packet requires 42 bytes"), std::string::npos);
 }
 
+TEST(PacketSerializerTest, PayloadLengthExtendsSerializedPacket) {
+    auto packet = build_constructor("Ether()/Payload(length=32)");
+    std::vector<std::byte> payload(64, std::byte{0xff});
+
+    auto result = serialize_into(packet, payload);
+
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(result.packet_len, 46);
+    EXPECT_EQ(byte_at(payload, 14), 0);
+    EXPECT_EQ(byte_at(payload, 45), 0);
+    EXPECT_EQ(byte_at(payload, 46), 0xff);
+}
+
+TEST(PacketSerializerTest, PayloadTotalLengthExtendsSerializedPacket) {
+    auto packet = build_constructor("Ether()/IP()/Payload(total_length=100)");
+    std::vector<std::byte> payload(128);
+
+    auto result = serialize_into(packet, payload);
+
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(result.packet_len, 100);
+}
+
+TEST(PacketSerializerTest, SerializesIpv4OptionsAndAdvancesNextHeader) {
+    auto packet = build_constructor("IP(options=IPOption_NOP()/IPOption_EOL())/TCP()");
+    std::vector<std::byte> payload(64);
+
+    auto result = serialize_into(packet, payload);
+
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(result.packet_len, 44);
+    EXPECT_EQ(byte_at(payload, 0), 0x46);
+    EXPECT_EQ(byte_at(payload, 20), 1);
+    EXPECT_EQ(byte_at(payload, 21), 0);
+    EXPECT_EQ(byte_at(payload, 22), 0);
+    EXPECT_EQ(byte_at(payload, 23), 0);
+    EXPECT_EQ(byte_at(payload, 24 + 12), 0x50);
+}
+
+TEST(PacketSerializerTest, SerializesTcpOptionsAndPadsHeader) {
+    auto packet = build_constructor("IP()/TCP(options=TCPOption_MSS(value=1460))");
+    std::vector<std::byte> payload(64);
+
+    auto result = serialize_into(packet, payload);
+
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(result.packet_len, 44);
+    EXPECT_EQ(byte_at(payload, 20 + 12), 0x60);
+    EXPECT_EQ(byte_at(payload, 40), 2);
+    EXPECT_EQ(byte_at(payload, 41), 4);
+    EXPECT_EQ(u16_at(payload, 42), 1460);
+}
+
+TEST(PacketSerializerTest, TcpOptionHeaderLengthFeedsHardwareOffload) {
+    auto packet = build_constructor("IP()/TCP(options=TCPOption_MSS(value=1460))/Payload(length=4)");
+    std::vector<std::byte> payload(64);
+
+    auto serialize = serialize_into(packet, payload);
+    ASSERT_TRUE(serialize.ok);
+
+    FixupOptions options;
+    options.tcp_checksum = FixupMode::HardwareOffload;
+    auto fixup = fixup_packet(packet, Registry{}, PacketBufferView{payload}, serialize.packet_len, options);
+
+    ASSERT_TRUE(fixup.ok);
+    EXPECT_TRUE(fixup.offload.tcp_checksum);
+    EXPECT_EQ(fixup.offload.l3_len, 20);
+    EXPECT_EQ(fixup.offload.l4_len, 24);
+}
+
 TEST(PacketSerializerTest, SerializesFirstRangeValueIntoBasePayload) {
     auto packet = build_constructor(R"(IP(src="[10.0.0.2-10.0.0.4]",dst="10.0.1.1-10.0.1.2"))");
     std::vector<std::byte> payload(20);

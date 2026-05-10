@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <format>
 #include <iostream>
+#include <type_traits>
+#include <utility>
 
 namespace packet {
 
@@ -46,9 +48,27 @@ Checker::Result Checker::check(const Packet& packet) const {
             if (attr.value.has_value() && type_it != attr_types_.end()) {
                 auto type_name_it = type_it->second.find(attr.name);
                 if (type_name_it != type_it->second.end()) {
+                    auto value = evaluate(**attr.value);
+                    if (std::holds_alternative<Packet>(value)) {
+                        result.errors.push_back(
+                            std::format("attribute '{}' in header '{}' requires a scalar value",
+                                        attr.name, header.protocol));
+                        result.ok = false;
+                        continue;
+                    }
+
+                    auto scalar = std::visit([](auto&& v) -> ValueType {
+                        using T = std::decay_t<decltype(v)>;
+                        if constexpr (std::is_same_v<T, Packet>) {
+                            return ValueType{int64_t{0}};
+                        } else {
+                            return ValueType{std::move(v)};
+                        }
+                    }, std::move(value));
+
                     auto validator_it = type_validators_.find(type_name_it->second);
                     if (validator_it != type_validators_.end()) {
-                        auto err = validator_it->second->validate(*attr.value);
+                        auto err = validator_it->second->validate(scalar);
                         if (err) {
                             result.errors.push_back(
                                 std::format("invalid '{}' in header '{}': {}",
@@ -56,6 +76,18 @@ Checker::Result Checker::check(const Packet& packet) const {
                             result.ok = false;
                         }
                     }
+                }
+            } else if (attr.value.has_value()) {
+                auto value = evaluate(**attr.value);
+                if (std::holds_alternative<Packet>(value)) {
+                    auto nested = check(std::get<Packet>(value));
+                    result.warnings.insert(result.warnings.end(),
+                                           nested.warnings.begin(),
+                                           nested.warnings.end());
+                    result.errors.insert(result.errors.end(),
+                                         nested.errors.begin(),
+                                         nested.errors.end());
+                    result.ok = result.ok && nested.ok;
                 }
             }
         }

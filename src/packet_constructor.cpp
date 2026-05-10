@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <format>
+#include <limits>
+#include <memory>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
@@ -135,6 +137,116 @@ std::optional<ConstructorValue> construct_value(const OptionSpec& option,
     return construct_value(option.type_name, bit_width_for_type_name(option.type_name), value, error);
 }
 
+std::optional<ValueType> scalar_attribute_value(const Attribute& attr, std::string& error) {
+    if (!attr.value) {
+        error = "requires a value";
+        return std::nullopt;
+    }
+
+    auto value = evaluate(**attr.value);
+    if (std::holds_alternative<std::string>(value)) {
+        return ValueType{std::get<std::string>(std::move(value))};
+    }
+    if (std::holds_alternative<int64_t>(value)) {
+        return ValueType{std::get<int64_t>(value)};
+    }
+
+    error = "requires a scalar value";
+    return std::nullopt;
+}
+
+std::optional<Packet> packet_attribute_value(const Attribute& attr, std::string& error) {
+    if (!attr.value) {
+        error = "requires a value";
+        return std::nullopt;
+    }
+
+    auto value = evaluate(**attr.value);
+    if (!std::holds_alternative<Packet>(value)) {
+        error = "requires a packet value";
+        return std::nullopt;
+    }
+    return std::get<Packet>(std::move(value));
+}
+
+const ConstructorValue* scalar_option_value(const OptionConstructor& option) {
+    if (!std::holds_alternative<ConstructorValue>(option.value)) {
+        return nullptr;
+    }
+    return &std::get<ConstructorValue>(option.value);
+}
+
+size_t packet_bit_width(const PacketConstructor& packet, const Registry& registry) {
+    size_t bit_width = 0;
+    for (const auto& header : packet) {
+        if (const auto* spec = registry.find_header(header.protocol)) {
+            bit_width = std::max(bit_width, header.offset * 8 + spec->bit_width);
+        }
+    }
+    return bit_width;
+}
+
+size_t packet_option_bit_width(const OptionConstructor& option, const Registry& registry) {
+    if (!std::holds_alternative<std::shared_ptr<PacketConstructor>>(option.value)) {
+        return 0;
+    }
+    const auto& packet = *std::get<std::shared_ptr<PacketConstructor>>(option.value);
+    const auto bit_width = packet_bit_width(packet, registry);
+    return ((bit_width + 31) / 32) * 32;
+}
+
+FieldConstructor* find_field(HeaderConstructor& header, std::string_view name);
+
+size_t header_option_bit_width(HeaderConstructor& header,
+                               const Registry& registry,
+                               PacketConstructorBuilder::Result& result) {
+    const auto option_it = std::ranges::find_if(header.options, [](const OptionConstructor& option) {
+        return option.name == "options" &&
+               std::holds_alternative<std::shared_ptr<PacketConstructor>>(option.value);
+    });
+    if (option_it == header.options.end()) {
+        return 0;
+    }
+    if (header.protocol != "IP" && header.protocol != "TCP") {
+        result.errors.push_back(std::format("packet-valued option '{}.{}' is not serializable",
+                                            header.protocol,
+                                            option_it->name));
+        return 0;
+    }
+
+    constexpr size_t base_header_bytes = 20;
+    const auto option_bits = packet_option_bit_width(*option_it, registry);
+    const auto header_bytes = base_header_bytes + option_bits / 8;
+    if (header_bytes > 60) {
+        result.errors.push_back(std::format("{} header with options is {} bytes but maximum is 60",
+                                            header.protocol,
+                                            header_bytes));
+        return 0;
+    }
+
+    const auto words = static_cast<uint64_t>(header_bytes / 4);
+    const auto field_name = header.protocol == "IP" ? std::string_view{"ihl"} : std::string_view{"dataofs"};
+    auto* length_field = find_field(header, field_name);
+    if (!length_field) {
+        result.errors.push_back(std::format("{} header is missing {} field",
+                                            header.protocol,
+                                            field_name));
+        return 0;
+    }
+    if (length_field->explicitly_set) {
+        if (!std::holds_alternative<uint64_t>(length_field->value) ||
+            std::get<uint64_t>(length_field->value) != words) {
+            result.errors.push_back(std::format("explicit '{}.{}' does not match option header length {} words",
+                                                header.protocol,
+                                                field_name,
+                                                words));
+        }
+    } else {
+        length_field->value = ConstructorValue{words};
+    }
+    return option_bits;
+}
+
 FieldConstructor* find_field(HeaderConstructor& header, std::string_view name) {
     auto it = std::ranges::find_if(header.fields, [name](const FieldConstructor& field) {
         return field.name == name;
@@ -143,6 +255,82 @@ FieldConstructor* find_field(HeaderConstructor& header, std::string_view name) {
         return nullptr;
     }
     return &*it;
+}
+
+OptionConstructor* find_option(HeaderConstructor& header, std::string_view name) {
+    auto it = std::ranges::find_if(header.options, [name](const OptionConstructor& option) {
+        return option.name == name;
+    });
+    if (it == header.options.end()) {
+        return nullptr;
+    }
+    return &*it;
+}
+
+std::optional<uint64_t> integer_option_value(const HeaderConstructor& header,
+                                             const OptionConstructor& option,
+                                             PacketConstructorBuilder::Result& result) {
+    const auto* value = scalar_option_value(option);
+    if (value && std::holds_alternative<uint64_t>(*value)) {
+        return std::get<uint64_t>(*value);
+    }
+    result.errors.push_back(std::format("option '{}.{}' is not an integer value",
+                                        header.protocol,
+                                        option.name));
+    return std::nullopt;
+}
+
+size_t payload_bit_width(HeaderConstructor& header,
+                         size_t packet_bit_offset,
+                         PacketConstructorBuilder::Result& result) {
+    if (header.protocol != "Payload") {
+        return 0;
+    }
+
+    auto* length = find_option(header, "length");
+    auto* total_length = find_option(header, "total_length");
+    if (!length) {
+        result.errors.push_back("Payload header is missing length option");
+        return 0;
+    }
+
+    if (total_length && total_length->explicitly_set) {
+        if (length->explicitly_set) {
+            result.errors.push_back("Payload length and total_length cannot both be explicitly set");
+            return 0;
+        }
+
+        const auto total_bytes = integer_option_value(header, *total_length, result);
+        if (!total_bytes) {
+            return 0;
+        }
+        const auto prefix_bytes = packet_bit_offset / 8;
+        if (*total_bytes < prefix_bytes) {
+            result.errors.push_back(std::format(
+                "Payload total_length {} is smaller than preceding header length {}",
+                *total_bytes,
+                prefix_bytes));
+            return 0;
+        }
+
+        const auto payload_bytes = *total_bytes - prefix_bytes;
+        if (payload_bytes > std::numeric_limits<size_t>::max() / 8) {
+            result.errors.push_back(std::format("Payload length {} is too large", payload_bytes));
+            return 0;
+        }
+        length->value = ConstructorValue{payload_bytes};
+        return static_cast<size_t>(payload_bytes) * 8;
+    }
+
+    const auto length_bytes = integer_option_value(header, *length, result);
+    if (!length_bytes) {
+        return 0;
+    }
+    if (*length_bytes > std::numeric_limits<size_t>::max() / 8) {
+        result.errors.push_back(std::format("Payload length {} is too large", *length_bytes));
+        return 0;
+    }
+    return static_cast<size_t>(*length_bytes) * 8;
 }
 
 void apply_inference_rules(PacketConstructor& constructor,
@@ -242,14 +430,15 @@ PacketConstructorBuilder::Result PacketConstructorBuilder::build(const Packet& p
             }
 
             const auto& attr = *attr_it->second;
-            if (!attr.value) {
-                result.errors.push_back(std::format("attribute '{}' in header '{}' requires a value",
-                                                    attr.name, header.protocol));
+            std::string error;
+            auto attr_value = scalar_attribute_value(attr, error);
+            if (!attr_value) {
+                result.errors.push_back(std::format("attribute '{}' in header '{}' {}",
+                                                    attr.name, header.protocol, error));
                 continue;
             }
 
-            std::string error;
-            auto value = construct_value(field, *attr.value, error);
+            auto value = construct_value(field, *attr_value, error);
             if (!value) {
                 result.errors.push_back(std::format("invalid '{}' in header '{}': {}",
                                                     attr.name, header.protocol, error));
@@ -276,24 +465,55 @@ PacketConstructorBuilder::Result PacketConstructorBuilder::build(const Packet& p
             }
 
             const auto& attr = *attr_it->second;
-            if (!attr.value) {
-                result.errors.push_back(std::format("attribute '{}' in header '{}' requires a value",
-                                                    attr.name, header.protocol));
-                continue;
-            }
+            if (option.value_kind == AttrValueKind::Packet) {
+                std::string error;
+                auto packet_value = packet_attribute_value(attr, error);
+                if (!packet_value) {
+                    result.errors.push_back(std::format("attribute '{}' in header '{}' {}",
+                                                        attr.name, header.protocol, error));
+                    continue;
+                }
 
-            std::string error;
-            auto value = construct_value(option, *attr.value, error);
-            if (!value) {
-                result.errors.push_back(std::format("invalid '{}' in header '{}': {}",
-                                                    attr.name, header.protocol, error));
-                continue;
+                auto nested = build(*packet_value);
+                result.warnings.insert(result.warnings.end(),
+                                       nested.warnings.begin(),
+                                       nested.warnings.end());
+                if (!nested.ok || !nested.packet) {
+                    for (const auto& nested_error : nested.errors) {
+                        result.errors.push_back(std::format("invalid packet option '{}.{}': {}",
+                                                            header.protocol,
+                                                            attr.name,
+                                                            nested_error));
+                    }
+                    continue;
+                }
+
+                header_constructor.options.push_back(OptionConstructor{
+                    option.name,
+                    std::make_shared<PacketConstructor>(std::move(*nested.packet)),
+                    true,
+                });
+            } else {
+                std::string error;
+                auto attr_value = scalar_attribute_value(attr, error);
+                if (!attr_value) {
+                    result.errors.push_back(std::format("attribute '{}' in header '{}' {}",
+                                                        attr.name, header.protocol, error));
+                    continue;
+                }
+
+                auto value = construct_value(option, *attr_value, error);
+                if (!value) {
+                    result.errors.push_back(std::format("invalid '{}' in header '{}': {}",
+                                                        attr.name, header.protocol, error));
+                    continue;
+                }
+                header_constructor.options.push_back(OptionConstructor{
+                    option.name,
+                    std::move(*value),
+                    true,
+                });
             }
-            header_constructor.options.push_back(OptionConstructor{
-                option.name,
-                std::move(*value),
-                true,
-            });
         }
 
         for (const auto& [name, attr] : attrs) {
@@ -309,8 +529,13 @@ PacketConstructorBuilder::Result PacketConstructorBuilder::build(const Packet& p
             }
         }
 
+        const auto option_bit_width = header_option_bit_width(header_constructor, registry_, result);
+
         constructor.push_back(std::move(header_constructor));
-        packet_bit_offset += header_spec->bit_width;
+        packet_bit_offset += header_spec->bit_width + option_bit_width;
+        if (packet_bit_offset % 8 == 0) {
+            packet_bit_offset += payload_bit_width(constructor.back(), packet_bit_offset, result);
+        }
     }
 
     if (!result.errors.empty()) {

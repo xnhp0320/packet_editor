@@ -5,11 +5,16 @@
 #include "packet/value.hpp"
 
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace packet {
+
+struct HeaderConstructor;
+using PacketConstructor = std::vector<HeaderConstructor>;
 
 struct FieldConstructor {
     std::string name;
@@ -19,7 +24,7 @@ struct FieldConstructor {
 
 struct OptionConstructor {
     std::string name;
-    ConstructorValue value;
+    std::variant<ConstructorValue, std::shared_ptr<PacketConstructor>> value;
     bool explicitly_set = false;
 };
 
@@ -29,8 +34,6 @@ struct HeaderConstructor {
     std::vector<FieldConstructor> fields;
     std::vector<OptionConstructor> options;
 };
-
-using PacketConstructor = std::vector<HeaderConstructor>;
 
 class PacketConstructorBuilder {
 public:

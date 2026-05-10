@@ -14,10 +14,16 @@
 
 namespace packet {
 
+enum class AttrValueKind {
+    Scalar,
+    Packet,
+};
+
 struct AttrSpec {
     std::string name;
     std::string type_name;
     std::optional<ConstructorValue> default_value;
+    AttrValueKind value_kind = AttrValueKind::Scalar;
 };
 
 struct FieldSpec {
@@ -31,6 +37,7 @@ struct FieldSpec {
 struct OptionSpec {
     std::string name;
     std::string type_name;
+    AttrValueKind value_kind = AttrValueKind::Scalar;
     std::optional<ConstructorValue> default_value;
 };
 

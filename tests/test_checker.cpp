@@ -7,7 +7,7 @@
 using namespace packet;
 
 TEST(CheckerTest, AllKnownHeaders) {
-    Parser parser("Ether()/VLAN()/IP()/IPv6()/TCP()/UDP()/ICMP()/VXLAN()");
+    Parser parser("Ether()/VLAN()/IP()/IPv6()/TCP()/UDP()/ICMP()/VXLAN()/Payload()/IPOption_EOL()/IPOption_NOP()/TCPOption_EOL()/TCPOption_NOP()/TCPOption_MSS()/TCPOption_WS()/TCPOption_SACKPermitted()/TCPOption_Timestamp()");
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
