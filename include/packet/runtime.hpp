@@ -32,8 +32,8 @@ public:
     explicit Runtime(Registry registry);
 
     Result check(const Program& program) const;
-    Result init(const Program& program, std::string_view eal_program_name = "packet_editor");
-    Result run(const Program& program, std::string_view eal_program_name = "packet_editor");
+    Result init(const Program& program, std::string_view eal_program_name = "ffg");
+    Result run(const Program& program, std::string_view eal_program_name = "ffg");
 
 private:
     struct Config {

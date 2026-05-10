@@ -5,8 +5,7 @@ packet description language. It is built for generating high-rate packet streams
 from readable packet programs, including range expressions that expand one packet
 template into a set of flows.
 
-The repository and CMake project are currently named `packet_editor`; FlowForge
-is the proposed product/project name.
+The command-line binary is `ffg`.
 
 ## Features
 
@@ -87,7 +86,7 @@ cmake --build build -j2
 Run a packet program with the DPDK tap runtime:
 
 ```sh
-./build/packet_tap_runtime examples/tap_runtime.packet
+./build/ffg examples/tap_runtime.packet
 ```
 
 The current tap runtime creates the tap interface `packet_tap0`. Creating and
@@ -118,7 +117,7 @@ cmake --build build -j2
 ctest --test-dir build -R E2ETest --output-on-failure
 ```
 
-The e2e suite launches `packet_tap_runtime`, captures packets from `packet_tap0`
+The e2e suite launches `ffg`, captures packets from `packet_tap0`
 with Scapy, reloads Scapy's interface cache between runs, and validates normal
 IPv4 TCP/UDP/ICMP packets, VXLAN encapsulation, IP/TCP options, and flow range
 expansion.

@@ -155,11 +155,8 @@ if(PACKET_BUILD_DPDK)
     )
     target_link_libraries(packet_runtime PUBLIC packet DPDK::dpdk)
 
-    add_executable(packet_dpdk_init apps/dpdk_init.cpp)
-    target_link_libraries(packet_dpdk_init PRIVATE packet_runtime)
-
-    add_executable(packet_tap_runtime apps/dpdk_init.cpp)
-    target_link_libraries(packet_tap_runtime PRIVATE packet_runtime)
+    add_executable(ffg apps/dpdk_init.cpp)
+    target_link_libraries(ffg PRIVATE packet_runtime)
 
     add_executable(test_runtime tests/test_runtime.cpp)
     target_link_libraries(test_runtime packet_runtime gtest_main)
@@ -197,7 +194,7 @@ if(PACKET_BUILD_DPDK)
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/run_pytest.py
                 --venv ${CMAKE_CURRENT_BINARY_DIR}/e2e-venv
                 --requirements ${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/requirements.txt
-                --runtime $<TARGET_FILE:packet_tap_runtime>
+                --runtime $<TARGET_FILE:ffg>
                 --
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e
         )

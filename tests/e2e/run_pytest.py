@@ -41,7 +41,7 @@ def ensure_venv(venv_dir: Path, requirements: Path) -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run packet_editor e2e pytest suite in a venv.")
+    parser = argparse.ArgumentParser(description="Run FlowForge e2e pytest suite in a venv.")
     parser.add_argument("--venv", required=True, type=Path)
     parser.add_argument("--requirements", required=True, type=Path)
     parser.add_argument("--runtime", required=True, type=Path)
@@ -50,7 +50,7 @@ def main() -> int:
 
     python = ensure_venv(args.venv, args.requirements)
     env = os.environ.copy()
-    env["PACKET_TAP_RUNTIME"] = str(args.runtime)
+    env["FFG_RUNTIME"] = str(args.runtime)
 
     pytest_args = args.pytest_args
     if pytest_args and pytest_args[0] == "--":

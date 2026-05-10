@@ -19,8 +19,8 @@ TX_DELAY_MS = "500"
 def pytest_addoption(parser):
     parser.addoption(
         "--runtime",
-        default=os.environ.get("PACKET_TAP_RUNTIME"),
-        help="Path to packet_tap_runtime.",
+        default=os.environ.get("FFG_RUNTIME") or os.environ.get("PACKET_TAP_RUNTIME"),
+        help="Path to the ffg runtime binary.",
     )
 
 
@@ -28,10 +28,10 @@ def pytest_addoption(parser):
 def runtime_binary(pytestconfig):
     runtime = pytestconfig.getoption("--runtime")
     if not runtime:
-        pytest.skip("packet_tap_runtime path was not provided")
+        pytest.skip("ffg runtime path was not provided")
     path = Path(runtime)
     if not path.exists():
-        pytest.skip(f"packet_tap_runtime does not exist: {path}")
+        pytest.skip(f"ffg runtime does not exist: {path}")
     return path
 
 
