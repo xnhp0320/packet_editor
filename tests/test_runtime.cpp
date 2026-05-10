@@ -89,6 +89,19 @@ PACKET: IP(src="[10.0.0.1-10.0.0.3]",dst="[10.0.1.1-10.0.1.2]"))");
     EXPECT_EQ(result.planned_packets, 4);
 }
 
+TEST(RuntimeTest, PortRangesContributeToFlowExpansion) {
+    auto program = parse_program(R"(DPDK_ARGS: "--no-huge --no-pci -l 0"
+PACKET: IP()/TCP(sport="[10000-10002]",dport="[20000-20001]"))");
+
+    Runtime runtime;
+    auto result = runtime.check(program);
+
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+    EXPECT_EQ(result.total_flows, 6);
+    EXPECT_EQ(result.planned_packets, 6);
+}
+
 TEST(RuntimeTest, PacketCountLargerThanRangeSendsOnePassOnly) {
     auto program = parse_program(R"(DPDK_ARGS: "--no-huge --no-pci -l 0"
 PACKET_COUNT: 10

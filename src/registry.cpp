@@ -155,8 +155,8 @@ Registry::Registry() {
     });
 
     register_header("TCP", {
-        {"sport",    "b16"},
-        {"dport",    "b16"},
+        {"sport",    "b16_ranges"},
+        {"dport",    "b16_ranges"},
         {"seq",      "b32"},
         {"ack",      "b32"},
         {"dataofs",  "b4", ConstructorValue{uint64_t{5}}},
@@ -170,8 +170,8 @@ Registry::Registry() {
     });
 
     register_header("UDP", {
-        {"sport",  "b16"},
-        {"dport",  "b16"},
+        {"sport",  "b16_ranges"},
+        {"dport",  "b16_ranges"},
         {"len",    "b16"},
         {"chksum", "b16"},
     });

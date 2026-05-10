@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PACKET_BUILD_DPDK "Build the bundled DPDK release and define DPDK::dpdk for future targets" ON)
+option(PACKET_BUILD_E2E_TESTS "Register pytest/scapy DPDK tap end-to-end tests" OFF)
 
 include(FetchContent)
 
@@ -187,4 +188,19 @@ add_test(NAME PacketConstructorTest COMMAND test_packet_constructor)
 add_test(NAME PacketSerializerTest COMMAND test_packet_serializer)
 if(PACKET_BUILD_DPDK)
     add_test(NAME RuntimeTest COMMAND test_runtime)
+    if(PACKET_BUILD_E2E_TESTS)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(
+            NAME E2ETest
+            COMMAND
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/run_pytest.py
+                --venv ${CMAKE_CURRENT_BINARY_DIR}/e2e-venv
+                --requirements ${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/requirements.txt
+                --runtime $<TARGET_FILE:packet_tap_runtime>
+                --
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e
+        )
+        set_tests_properties(E2ETest PROPERTIES TIMEOUT 180)
+    endif()
 endif()

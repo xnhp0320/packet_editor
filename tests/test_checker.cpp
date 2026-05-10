@@ -495,7 +495,7 @@ TEST(CheckerTest, BitFieldB64) {
 }
 
 TEST(CheckerTest, BitFieldMustBeInteger) {
-    Parser parser(R"(TCP(dport="not-a-number"))");
+    Parser parser(R"(IP(ttl="not-a-number"))");
     auto pkt = parser.parse_packet();
     ASSERT_TRUE(pkt.has_value());
 
@@ -504,6 +504,18 @@ TEST(CheckerTest, BitFieldMustBeInteger) {
     auto result = checker.check(*pkt);
     EXPECT_FALSE(result.ok);
     EXPECT_TRUE(result.errors[0].find("expected integer") != std::string::npos);
+}
+
+TEST(CheckerTest, PortFieldsAcceptRanges) {
+    Parser parser(R"(TCP(sport="[10000-10002]",dport="[20000-20001]")/UDP(sport="[30000-30002]",dport=53))");
+    auto pkt = parser.parse_packet();
+    ASSERT_TRUE(pkt.has_value());
+
+    Registry registry;
+    Checker checker{registry};
+    auto result = checker.check(*pkt);
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
 }
 
 TEST(CheckerTest, BitFieldB4Max) {
