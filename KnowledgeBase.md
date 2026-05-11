@@ -20,3 +20,20 @@ Project policy:
 
 This keeps file output available in `PACKET_BUILD_DPDK=OFF` builds and avoids
 reintroducing libpcap into the static DPDK link.
+
+## Static linking and binary portability
+
+A project goal is to produce a self-contained `ffg` binary via static linking.
+This allows the same binary to run on different servers with different OS
+versions without requiring matching system libraries at runtime.
+
+All external dependencies (DPDK, GoogleTest) are built from source alongside the
+project to avoid accidental dynamic linkage against system-provided versions.
+
+## Mellanox NIC support
+
+The production environment uses Mellanox ConnectX NICs (ConnectX-5, ConnectX-6,
+ConnectX-7). The bundled DPDK is currently configured with minimal drivers
+(no mlx5 driver) to keep build times fast during development and unit-test
+focused work. The production target is to enable the `mlx5` PMD and its
+dependencies (libibverbs, rdma-core) in the DPDK build configuration.
