@@ -10,17 +10,13 @@
 #include <rte_mempool.h>
 
 #include <algorithm>
-#include <charconv>
 #include <cerrno>
-#include <chrono>
 #include <cstring>
-#include <cstdlib>
 #include <format>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -279,26 +275,6 @@ bool transmit_planned_packets(uint16_t port_id,
     return true;
 }
 
-void apply_transmit_delay(Runtime::Result& result) {
-    const char* raw_delay = std::getenv("PACKET_RUNTIME_TX_DELAY_MS");
-    if (raw_delay == nullptr || *raw_delay == '\0') {
-        return;
-    }
-
-    uint64_t delay_ms = 0;
-    const std::string_view delay{raw_delay};
-    const auto* first = delay.data();
-    const auto* last = first + delay.size();
-    auto [ptr, ec] = std::from_chars(first, last, delay_ms);
-    if (ec != std::errc{} || ptr != last) {
-        result.warnings.push_back(std::format("ignored invalid PACKET_RUNTIME_TX_DELAY_MS '{}'",
-                                              delay));
-        return;
-    }
-
-    std::this_thread::sleep_for(std::chrono::milliseconds{delay_ms});
-}
-
 void stop_and_close_port(uint16_t port_id, Runtime::Result& result) {
     int rc = rte_eth_dev_stop(port_id);
     if (rc < 0) {
@@ -554,7 +530,6 @@ Runtime::Result Runtime::run(const Program& program, std::string_view eal_progra
         probe_tap_port(result) &&
         configure_and_start_port(runtime_port_id, *mbuf_pool, result)) {
         port_started = true;
-        apply_transmit_delay(result);
         transmit_planned_packets(runtime_port_id,
                                  *mbuf_pool,
                                  generator,
@@ -565,6 +540,8 @@ Runtime::Result Runtime::run(const Program& program, std::string_view eal_progra
     if (port_started) {
         stop_and_close_port(runtime_port_id, result);
     }
+
+    mbuf_pool.reset();
     cleanup_eal(result);
 
     result.ok = result.errors.empty();

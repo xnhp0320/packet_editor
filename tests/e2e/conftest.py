@@ -1,5 +1,7 @@
 import os
 import platform
+import select
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -8,12 +10,13 @@ from typing import Optional
 import pytest
 
 scapy = pytest.importorskip("scapy.all")
-from scapy.all import AsyncSniffer, Ether, conf, get_if_list  # noqa: E402
+from scapy.all import Ether  # noqa: E402
 
 
 TAP_IFACE = "packet_tap0"
 DEFAULT_DPDK_ARGS = "--no-huge --no-pci -l 0"
-TX_DELAY_MS = "500"
+ETH_P_ALL = 0x0003
+RUNTIME_SRC_MAC = "02:64:74:61:70:00"
 
 
 def pytest_addoption(parser):
@@ -59,17 +62,6 @@ def packet_program(tmp_path):
     return write_program
 
 
-def reload_scapy_interfaces() -> None:
-    reload = getattr(conf.ifaces, "reload", None)
-    if reload is not None:
-        reload()
-
-
-def tap_is_visible() -> bool:
-    reload_scapy_interfaces()
-    return TAP_IFACE in get_if_list()
-
-
 def permission_error(output: str) -> bool:
     markers = [
         "/dev/net/tun",
@@ -81,50 +73,47 @@ def permission_error(output: str) -> bool:
     return any(marker in output for marker in markers)
 
 
+def is_runtime_packet(packet) -> bool:
+    return Ether in packet and packet.src == RUNTIME_SRC_MAC and packet.type == 0x0800
+
+
+def capture_runtime_packets(capture: socket.socket, expected_count: int, timeout: float):
+    packets = []
+    deadline = time.monotonic() + timeout
+    while len(packets) < expected_count and time.monotonic() < deadline:
+        wait = min(0.1, max(0.0, deadline - time.monotonic()))
+        readable, _, _ = select.select([capture], [], [], wait)
+        if not readable:
+            continue
+
+        data, _ = capture.recvfrom(65535)
+        packet = Ether(data)
+        if is_runtime_packet(packet):
+            packets.append(packet)
+    return packets
+
+
 @pytest.fixture
 def capture_packets(runtime_binary):
     def run(program: Path, expected_count: int, *, timeout: float = 8.0):
-        reload_scapy_interfaces()
-        env = os.environ.copy()
-        env["PACKET_RUNTIME_TX_DELAY_MS"] = TX_DELAY_MS
-        process = subprocess.Popen(
-            [str(runtime_binary), str(program)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-        )
+        with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)) as capture:
+            capture.setblocking(False)
+            process = subprocess.Popen(
+                [str(runtime_binary), str(program)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
 
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline and process.poll() is None:
-            if tap_is_visible():
-                break
-            time.sleep(0.02)
-        else:
-            stdout, stderr = process.communicate(timeout=1)
-            output = stdout + stderr
-            if permission_error(output):
-                pytest.skip(output.strip())
-            pytest.fail(f"{TAP_IFACE} did not appear before runtime exited\n{output}")
-
-        reload_scapy_interfaces()
-        sniffer = AsyncSniffer(
-            iface=TAP_IFACE,
-            count=expected_count,
-            timeout=max(1.0, timeout / 2),
-            store=True,
-        )
-        sniffer.start()
-        time.sleep(0.05)
+            packets = capture_runtime_packets(capture, expected_count, timeout)
 
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
+            stdout, stderr = process.communicate(timeout=1)
         except subprocess.TimeoutExpired:
             process.kill()
             stdout, stderr = process.communicate()
             pytest.fail(f"runtime timed out\nstdout:\n{stdout}\nstderr:\n{stderr}")
 
-        packets = list(sniffer.join())
         output = stdout + stderr
         if process.returncode != 0:
             if permission_error(output):
@@ -135,6 +124,6 @@ def capture_packets(runtime_binary):
                 f"captured {len(packets)} packet(s), expected {expected_count}\n"
                 f"stdout:\n{stdout}\nstderr:\n{stderr}"
             )
-        return [Ether(bytes(packet)) for packet in packets]
+        return packets
 
     return run
