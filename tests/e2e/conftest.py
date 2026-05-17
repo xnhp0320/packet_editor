@@ -4,6 +4,7 @@ import select
 import socket
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +18,13 @@ TAP_IFACE = "packet_tap0"
 DEFAULT_DPDK_ARGS = "--no-huge --no-pci -l 0"
 ETH_P_ALL = 0x0003
 RUNTIME_SRC_MAC = "02:64:74:61:70:00"
+
+
+@dataclass
+class RuntimeCapture:
+    packets: list
+    stdout: str
+    stderr: str
 
 
 def pytest_addoption(parser):
@@ -50,10 +58,21 @@ def require_tap_host(runtime_binary):
 
 @pytest.fixture
 def packet_program(tmp_path):
-    def write_program(packet: str, *, packet_count: Optional[int] = None) -> Path:
-        lines = [f'DPDK_ARGS: "{DEFAULT_DPDK_ARGS}"']
+    def write_program(
+        packet: str,
+        *,
+        packet_count: Optional[int] = None,
+        dpdk_args: str = DEFAULT_DPDK_ARGS,
+        pmd_threads: Optional[int] = None,
+        tx_batch_size: Optional[int] = None,
+    ) -> Path:
+        lines = [f'DPDK_ARGS: "{dpdk_args}"']
         if packet_count is not None:
             lines.append(f"PACKET_COUNT: {packet_count}")
+        if pmd_threads is not None:
+            lines.append(f"PMD_THREADS: {pmd_threads}")
+        if tx_batch_size is not None:
+            lines.append(f"TX_BATCH_SIZE: {tx_batch_size}")
         lines.append(f"PACKET: {packet}")
         program = tmp_path / "traffic.packet"
         program.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -95,7 +114,7 @@ def capture_runtime_packets(capture: socket.socket, expected_count: int, timeout
 
 @pytest.fixture
 def capture_packets(runtime_binary):
-    def run(program: Path, expected_count: int, *, timeout: float = 8.0):
+    def run(program: Path, expected_count: int, *, timeout: float = 8.0, with_output: bool = False):
         with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)) as capture:
             capture.setblocking(False)
             process = subprocess.Popen(
@@ -124,6 +143,8 @@ def capture_packets(runtime_binary):
                 f"captured {len(packets)} packet(s), expected {expected_count}\n"
                 f"stdout:\n{stdout}\nstderr:\n{stderr}"
             )
+        if with_output:
+            return RuntimeCapture(packets=packets, stdout=stdout, stderr=stderr)
         return packets
 
     return run

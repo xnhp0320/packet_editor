@@ -115,6 +115,8 @@ struct WorkerStats {
 };
 
 struct WorkerContext {
+    uint64_t worker_id = 0;
+    uint64_t lcore_id = 0;
     uint16_t port_id = 0;
     uint16_t queue_id = 0;
     rte_mempool* mbuf_pool = nullptr;
@@ -214,7 +216,7 @@ bool probe_tap_port(Runtime::Result& result) {
 }
 
 bool configure_and_start_port(uint16_t port_id,
-                              uint16_t tx_queue_count,
+                              uint16_t queue_count,
                               rte_mempool& mbuf_pool,
                               Runtime::Result& result) {
     const uint16_t port_count = rte_eth_dev_count_avail();
@@ -230,7 +232,7 @@ bool configure_and_start_port(uint16_t port_id,
     }
 
     rte_eth_conf port_conf{};
-    int rc = rte_eth_dev_configure(port_id, 1, tx_queue_count, &port_conf);
+    int rc = rte_eth_dev_configure(port_id, queue_count, queue_count, &port_conf);
     if (rc < 0) {
         result.errors.push_back(std::format("rte_eth_dev_configure failed for port {}: {}",
                                             port_id,
@@ -238,21 +240,23 @@ bool configure_and_start_port(uint16_t port_id,
         return false;
     }
 
-    rc = rte_eth_rx_queue_setup(port_id,
-                                runtime_queue_id,
-                                runtime_rx_descriptors,
-                                rte_eth_dev_socket_id(port_id),
-                                nullptr,
-                                &mbuf_pool);
-    if (rc < 0) {
-        result.errors.push_back(std::format("rte_eth_rx_queue_setup failed for port {} queue {}: {}",
-                                            port_id,
-                                            runtime_queue_id,
-                                            rte_strerror(-rc)));
-        return false;
+    for (uint16_t queue_id = 0; queue_id < queue_count; ++queue_id) {
+        rc = rte_eth_rx_queue_setup(port_id,
+                                    queue_id,
+                                    runtime_rx_descriptors,
+                                    rte_eth_dev_socket_id(port_id),
+                                    nullptr,
+                                    &mbuf_pool);
+        if (rc < 0) {
+            result.errors.push_back(std::format("rte_eth_rx_queue_setup failed for port {} queue {}: {}",
+                                                port_id,
+                                                queue_id,
+                                                rte_strerror(-rc)));
+            return false;
+        }
     }
 
-    for (uint16_t queue_id = 0; queue_id < tx_queue_count; ++queue_id) {
+    for (uint16_t queue_id = 0; queue_id < queue_count; ++queue_id) {
         rc = rte_eth_tx_queue_setup(port_id,
                                     queue_id,
                                     runtime_tx_descriptors,
@@ -388,6 +392,16 @@ std::vector<unsigned> worker_lcores() {
     return lcores;
 }
 
+Runtime::WorkerResult make_worker_result(const WorkerContext& context) {
+    return Runtime::WorkerResult{
+        context.worker_id,
+        context.lcore_id,
+        context.queue_id,
+        context.stats.tx_attempted,
+        context.stats.tx_sent,
+    };
+}
+
 bool transmit_on_main(uint16_t port_id,
                       rte_mempool& mbuf_pool,
                       const PacketGenerator& generator,
@@ -395,6 +409,8 @@ bool transmit_on_main(uint16_t port_id,
                       uint16_t batch_size,
                       Runtime::Result& result) {
     WorkerContext context;
+    context.worker_id = 0;
+    context.lcore_id = rte_lcore_id();
     context.port_id = port_id;
     context.queue_id = 0;
     context.mbuf_pool = &mbuf_pool;
@@ -405,6 +421,7 @@ bool transmit_on_main(uint16_t port_id,
     const auto rc = run_worker(&context);
     result.tx_attempted += context.stats.tx_attempted;
     result.tx_sent += context.stats.tx_sent;
+    result.workers.push_back(make_worker_result(context));
     result.errors.insert(result.errors.end(), context.stats.errors.begin(), context.stats.errors.end());
     return rc == 0;
 }
@@ -431,6 +448,8 @@ bool transmit_on_workers(uint16_t port_id,
     bool ok = true;
     for (uint64_t worker = 0; worker < requested_workers; ++worker) {
         auto& context = contexts.emplace_back();
+        context.worker_id = worker;
+        context.lcore_id = lcores[worker];
         context.port_id = port_id;
         context.queue_id = static_cast<uint16_t>(worker);
         context.mbuf_pool = &mbuf_pool;
@@ -462,6 +481,7 @@ bool transmit_on_workers(uint16_t port_id,
     for (const auto& context : contexts) {
         result.tx_attempted += context.stats.tx_attempted;
         result.tx_sent += context.stats.tx_sent;
+        result.workers.push_back(make_worker_result(context));
         result.errors.insert(result.errors.end(), context.stats.errors.begin(), context.stats.errors.end());
     }
     return ok;
@@ -771,12 +791,12 @@ Runtime::Result Runtime::run(const Program& program, std::string_view eal_progra
 
     bool port_started = false;
     const auto worker_count = config->pmd_threads.value_or(1);
-    const auto tx_queue_count = static_cast<uint16_t>(worker_count);
+    const auto queue_count = static_cast<uint16_t>(worker_count);
     const auto batch_size = static_cast<uint16_t>(config->tx_batch_size);
     auto mbuf_pool = make_mbuf_pool(*generated.packet, worker_count, batch_size, result);
     if (mbuf_pool != nullptr &&
         probe_tap_port(result) &&
-        configure_and_start_port(runtime_port_id, tx_queue_count, *mbuf_pool, result)) {
+        configure_and_start_port(runtime_port_id, queue_count, *mbuf_pool, result)) {
         port_started = true;
         if (config->pmd_threads) {
             transmit_on_workers(runtime_port_id,

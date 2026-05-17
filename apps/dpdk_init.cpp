@@ -343,6 +343,13 @@ int run_live_mode(const CliOptions& options, char** argv) {
               << " flow(s), packet_len " << result.packet_len
               << " bytes, pmd_threads " << result.pmd_threads
               << ", tx_batch_size " << result.tx_batch_size << '\n';
+    for (const auto& worker : result.workers) {
+        std::cout << "PMD worker " << worker.worker_id
+                  << " lcore " << worker.lcore_id
+                  << " queue " << worker.queue_id
+                  << " sent " << worker.tx_sent << '/'
+                  << worker.tx_attempted << " packet(s)\n";
+    }
     return 0;
 #else
     std::cerr << "ERROR: live mode requires a build with PACKET_BUILD_DPDK=ON\n";

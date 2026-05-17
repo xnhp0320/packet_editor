@@ -15,6 +15,14 @@ namespace packet {
 
 class Runtime {
 public:
+    struct WorkerResult {
+        uint64_t worker_id = 0;
+        uint64_t lcore_id = 0;
+        uint16_t queue_id = 0;
+        uint64_t tx_attempted = 0;
+        uint64_t tx_sent = 0;
+    };
+
     struct Result {
         bool ok = false;
         std::vector<std::string> warnings;
@@ -28,6 +36,7 @@ public:
         uint64_t tx_sent = 0;
         uint64_t pmd_threads = 0;
         uint64_t tx_batch_size = 0;
+        std::vector<WorkerResult> workers;
     };
 
     Runtime();

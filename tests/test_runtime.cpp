@@ -117,6 +117,7 @@ PACKET: IP(src="[10.0.0.1-10.0.0.2]",dst="[10.0.1.1-10.0.1.2]"))");
     EXPECT_EQ(result.planned_packets, 4);
     EXPECT_EQ(result.pmd_threads, 2);
     EXPECT_EQ(result.tx_batch_size, 16);
+    EXPECT_TRUE(result.workers.empty());
 }
 
 TEST(RuntimeTest, PacketCountLargerThanRangeSendsOnePassOnly) {
