@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -27,6 +28,8 @@ struct CliOptions {
     std::optional<std::string> packet_expression;
     std::optional<std::string> output_file;
     std::optional<uint64_t> packet_count;
+    uint64_t clone_count = 1;
+    bool split = false;
     std::vector<std::string> errors;
 };
 
@@ -51,19 +54,26 @@ void print_usage(std::string_view program_name) {
     std::cerr << "usage:\n"
               << "  " << program_name << " <program-file>\n"
               << "  " << program_name << " <program-file> -o <pcap-file>\n"
-              << "  " << program_name << " -e <packet-expression> -o <pcap-file> [-c <count>]\n";
+              << "  " << program_name << " <program-file> [--clone <count>] [--split]\n"
+              << "  " << program_name << " -e <packet-expression> -o <pcap-file> [-c <count>] [--clone <count>]\n";
 }
 
-std::optional<uint64_t> parse_positive_u64(std::string_view value, std::string& error) {
+std::optional<uint64_t> parse_positive_u64(std::string_view value,
+                                           std::string_view name,
+                                           std::string& error) {
     uint64_t parsed = 0;
     const auto* first = value.data();
     const auto* last = first + value.size();
     auto [ptr, ec] = std::from_chars(first, last, parsed);
     if (ec != std::errc{} || ptr != last || parsed == 0) {
-        error = "packet count must be a positive integer";
+        error = std::string{name} + " must be a positive integer";
         return std::nullopt;
     }
     return parsed;
+}
+
+bool checked_clone_total(uint64_t planned_packets, uint64_t clone_count) {
+    return planned_packets <= std::numeric_limits<uint64_t>::max() / clone_count;
 }
 
 CliOptions parse_cli(int argc, char** argv) {
@@ -101,12 +111,26 @@ CliOptions parse_cli(int argc, char** argv) {
                 continue;
             }
             std::string error;
-            auto count = parse_positive_u64(*value, error);
+            auto count = parse_positive_u64(*value, "packet count", error);
             if (!count) {
                 options.errors.push_back(std::move(error));
                 continue;
             }
             options.packet_count = *count;
+        } else if (arg == "--clone") {
+            auto value = require_value(arg);
+            if (!value) {
+                continue;
+            }
+            std::string error;
+            auto count = parse_positive_u64(*value, "clone count", error);
+            if (!count) {
+                options.errors.push_back(std::move(error));
+                continue;
+            }
+            options.clone_count = *count;
+        } else if (arg == "--split") {
+            options.split = true;
         } else if (!arg.empty() && arg.front() == '-') {
             options.errors.push_back("unknown option '" + std::string{arg} + "'");
         } else {
@@ -229,6 +253,10 @@ FileProgram parse_file_program(std::string_view input,
 }
 
 int run_file_mode(const CliOptions& options) {
+    if (options.split) {
+        std::cerr << "ERROR: --split is only valid in live mode\n";
+        return 2;
+    }
     if (options.positional.size() > 1) {
         std::cerr << "ERROR: file mode accepts at most one program file\n";
         return 2;
@@ -267,6 +295,12 @@ int run_file_mode(const CliOptions& options) {
         return 1;
     }
 
+    if (!checked_clone_total(generated.packet->flow_plan.planned_packets, options.clone_count)) {
+        std::cerr << "ERROR: clone expansion has more than 18446744073709551615 packets\n";
+        return 1;
+    }
+    const auto total_packets = generated.packet->flow_plan.planned_packets * options.clone_count;
+
     std::ofstream output(*options.output_file, std::ios::binary);
     if (!output) {
         std::cerr << "ERROR: failed to open '" << *options.output_file << "' for writing\n";
@@ -292,13 +326,21 @@ int run_file_mode(const CliOptions& options) {
             print_messages({}, write_result.errors);
             return 1;
         }
+        for (uint64_t clone = 1; clone < options.clone_count; ++clone) {
+            write_result = writer.write_packet(payload);
+            if (!write_result.ok) {
+                print_messages({}, write_result.errors);
+                return 1;
+            }
+        }
     }
 
     std::cout << "PCAP file written to '" << *options.output_file << "' with "
-              << generated.packet->flow_plan.planned_packets << " packet(s), planned "
+              << total_packets << " packet(s), planned "
               << generated.packet->flow_plan.planned_packets << " of "
               << generated.packet->flow_plan.total_flows << " flow(s), packet_len "
-              << generated.packet->packet_len << " bytes\n";
+              << generated.packet->packet_len << " bytes, clone_count "
+              << options.clone_count << '\n';
     program.warnings.insert(program.warnings.end(), generated.warnings.begin(), generated.warnings.end());
     print_messages(program.warnings, generated.errors);
     return 0;
@@ -329,7 +371,10 @@ int run_live_mode(const CliOptions& options, char** argv) {
     }
 
     packet::Runtime runtime;
-    auto result = runtime.run(*program, argv[0]);
+    packet::Runtime::RunOptions run_options;
+    run_options.clone_count = options.clone_count;
+    run_options.split = options.split;
+    auto result = runtime.run(*program, argv[0], run_options);
     print_runtime_messages(result);
     if (!result.ok) {
         return 1;
@@ -342,11 +387,16 @@ int run_live_mode(const CliOptions& options, char** argv) {
               << result.planned_packets << " of " << result.total_flows
               << " flow(s), packet_len " << result.packet_len
               << " bytes, pmd_threads " << result.pmd_threads
-              << ", tx_batch_size " << result.tx_batch_size << '\n';
+              << ", tx_batch_size " << result.tx_batch_size
+              << ", clone_count " << result.clone_count
+              << ", split " << (result.split ? "on" : "off")
+              << ", planned_transmissions " << result.planned_transmissions << '\n';
     for (const auto& worker : result.workers) {
         std::cout << "PMD worker " << worker.worker_id
                   << " lcore " << worker.lcore_id
                   << " queue " << worker.queue_id
+                  << " flows " << worker.first_flow << '+'
+                  << worker.flow_count
                   << " sent " << worker.tx_sent << '/'
                   << worker.tx_attempted << " packet(s)\n";
     }

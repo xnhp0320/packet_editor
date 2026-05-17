@@ -7,7 +7,9 @@ from scapy.layers.vxlan import VXLAN
 
 
 ETHER = 'Ether(dst="ff:ff:ff:ff:ff:ff",src="02:64:74:61:70:00")'
-WORKER_RE = re.compile(r"PMD worker (\d+) lcore (\d+) queue (\d+) sent (\d+)/(\d+) packet\(s\)")
+WORKER_RE = re.compile(
+    r"PMD worker (\d+) lcore (\d+) queue (\d+) flows (\d+)\+(\d+) sent (\d+)/(\d+) packet\(s\)"
+)
 
 
 @pytest.mark.parametrize(
@@ -98,6 +100,25 @@ def test_generates_cartesian_ipv4_and_tcp_port_ranges(packet_program, capture_pa
     }
 
 
+def test_clone_repeats_each_flow_before_advancing(packet_program, capture_packets):
+    program = packet_program(
+        f'{ETHER}/IP(src="[10.0.0.1-10.0.0.2]",dst="10.0.1.1")/'
+        'TCP(sport=10000,dport=443,flags=2)',
+        packet_count=2,
+    )
+
+    result = capture_packets(program, 4, with_output=True, runtime_args=["--clone", "2"])
+    flows = [(packet[IP].src, packet[TCP].sport) for packet in result.packets]
+
+    assert flows == [
+        ("10.0.0.1", 10000),
+        ("10.0.0.1", 10000),
+        ("10.0.0.2", 10000),
+        ("10.0.0.2", 10000),
+    ]
+    assert "clone_count 2" in result.stdout
+
+
 def test_multi_pmd_workers_emit_duplicate_cartesian_ranges(packet_program, capture_packets):
     program = packet_program(
         f'{ETHER}/IP(src="[10.0.0.1-10.0.0.2]",dst="10.0.1.1")/'
@@ -126,12 +147,59 @@ def test_multi_pmd_workers_emit_duplicate_cartesian_ranges(packet_program, captu
             "worker": int(match.group(1)),
             "lcore": int(match.group(2)),
             "queue": int(match.group(3)),
-            "sent": int(match.group(4)),
-            "attempted": int(match.group(5)),
+            "first_flow": int(match.group(4)),
+            "flow_count": int(match.group(5)),
+            "sent": int(match.group(6)),
+            "attempted": int(match.group(7)),
         }
         for match in WORKER_RE.finditer(result.stdout)
     ]
     assert len(workers) == 2
     assert {worker["worker"] for worker in workers} == {0, 1}
     assert {worker["queue"] for worker in workers} == {0, 1}
+    assert all(worker["first_flow"] == 0 and worker["flow_count"] == 4 for worker in workers)
     assert all(worker["sent"] == 4 and worker["attempted"] == 4 for worker in workers)
+
+
+def test_split_pmd_workers_partition_cartesian_ranges(packet_program, capture_packets):
+    program = packet_program(
+        f'{ETHER}/IP(src="[10.0.0.1-10.0.0.3]",dst="10.0.1.1")/'
+        'TCP(sport="[10000-10001]",dport=443,flags=2)',
+        packet_count=5,
+        dpdk_args="--no-huge --no-pci -l 0-2",
+        pmd_threads=2,
+        tx_batch_size=4,
+    )
+
+    result = capture_packets(program, 5, with_output=True, runtime_args=["--split"])
+    flows = Counter((packet[IP].src, packet[TCP].sport) for packet in result.packets)
+    expected_flows = {
+        ("10.0.0.1", 10000),
+        ("10.0.0.2", 10000),
+        ("10.0.0.3", 10000),
+        ("10.0.0.1", 10001),
+        ("10.0.0.2", 10001),
+    }
+
+    assert set(flows) == expected_flows
+    assert all(count == 1 for count in flows.values())
+    assert "split on" in result.stdout
+
+    workers = [
+        {
+            "worker": int(match.group(1)),
+            "queue": int(match.group(3)),
+            "first_flow": int(match.group(4)),
+            "flow_count": int(match.group(5)),
+            "sent": int(match.group(6)),
+            "attempted": int(match.group(7)),
+        }
+        for match in WORKER_RE.finditer(result.stdout)
+    ]
+    assert len(workers) == 2
+    assert workers[0]["first_flow"] == 0
+    assert workers[0]["flow_count"] == 3
+    assert workers[1]["first_flow"] == 3
+    assert workers[1]["flow_count"] == 2
+    assert [worker["sent"] for worker in workers] == [3, 2]
+    assert [worker["attempted"] for worker in workers] == [3, 2]

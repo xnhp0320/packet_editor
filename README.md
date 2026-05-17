@@ -112,25 +112,34 @@ Run a packet program with the DPDK tap runtime:
 
 ```sh
 ./build/ffg examples/tap_runtime.packet
+./build/ffg examples/tap_runtime.packet --clone 4
 ```
 
 The current tap runtime creates the tap interface `packet_tap0`. Creating and
 capturing from tap interfaces generally requires root or equivalent network
 capabilities.
 
+`--clone N` sends `N` copies of each generated packet format before advancing
+to the next range value. With multiple `PMD_THREADS`, workers duplicate the
+planned range by default. Add `--split` to partition the planned flow formats
+across PMD workers instead; when the range count is not divisible by the worker
+count, earlier workers receive one extra flow format.
+
 Write generated packets to a pcap file without starting DPDK:
 
 ```sh
 ./build/ffg examples/tap_runtime.packet -o flows.pcap
 ./build/ffg -e 'Ether()/IP(src="[10.0.0.1-10.0.0.4]")/UDP()' -o flows.pcap -c 2
+./build/ffg -e 'Ether()/IP(src="[10.0.0.1-10.0.0.4]")/UDP()' -o flows.pcap -c 2 --clone 3
 ```
 
 When `-o` is present, `ffg` enters file mode. File mode accepts either a packet
 program file or an inline packet expression with `-e`. A leading `PACKET:` in
 the `-e` expression is accepted but not required. `PACKET_COUNT` in a program
 file or `-c` on the command line caps range expansion; specifying both is an
-error. File mode writes pcap directly and does not link libpcap or initialize
-DPDK.
+error. The `--clone` option multiplies emitted packets after this cap, so
+`-c 2 --clone 3` writes six packets. File mode writes pcap directly and does
+not link libpcap or initialize DPDK.
 
 Example output:
 

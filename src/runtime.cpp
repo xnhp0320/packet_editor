@@ -119,6 +119,9 @@ struct WorkerContext {
     uint64_t lcore_id = 0;
     uint16_t port_id = 0;
     uint16_t queue_id = 0;
+    uint64_t first_flow = 0;
+    uint64_t flow_count = 0;
+    uint64_t clone_count = 1;
     rte_mempool* mbuf_pool = nullptr;
     const PacketGenerator* generator = nullptr;
     const GeneratedPacket* packet = nullptr;
@@ -351,13 +354,66 @@ bool transmit_batch(WorkerContext& context,
     return prepared == packet_count;
 }
 
+uint64_t checked_transmission_count(uint64_t flow_count,
+                                    uint64_t clone_count,
+                                    Runtime::Result& result) {
+    if (clone_count == 0) {
+        result.errors.emplace_back("clone count must be positive");
+        return 0;
+    }
+    if (flow_count > std::numeric_limits<uint64_t>::max() / clone_count) {
+        result.errors.emplace_back("clone expansion has more than 18446744073709551615 packets");
+        return 0;
+    }
+    return flow_count * clone_count;
+}
+
+uint64_t checked_total_transmission_count(uint64_t planned_flows,
+                                          uint64_t worker_count,
+                                          const Runtime::RunOptions& options,
+                                          Runtime::Result& result) {
+    const auto per_worker = checked_transmission_count(planned_flows, options.clone_count, result);
+    if (!result.errors.empty()) {
+        return 0;
+    }
+    if (options.split) {
+        return per_worker;
+    }
+    if (per_worker > std::numeric_limits<uint64_t>::max() / worker_count) {
+        result.errors.emplace_back("worker expansion has more than 18446744073709551615 packets");
+        return 0;
+    }
+    return per_worker * worker_count;
+}
+
+struct FlowRange {
+    uint64_t first = 0;
+    uint64_t count = 0;
+};
+
+FlowRange assigned_flow_range(uint64_t planned_flows,
+                              uint64_t worker_count,
+                              uint64_t worker_id,
+                              bool split) {
+    if (!split) {
+        return FlowRange{0, planned_flows};
+    }
+
+    const auto base = planned_flows / worker_count;
+    const auto extra = planned_flows % worker_count;
+    const auto count = base + (worker_id < extra ? 1 : 0);
+    const auto first = worker_id * base + std::min(worker_id, extra);
+    return FlowRange{first, count};
+}
+
 int run_worker(void* arg) {
     auto& context = *static_cast<WorkerContext*>(arg);
     std::array<rte_mbuf*, runtime_max_tx_batch_size> batch{};
-    uint64_t flow_index = 0;
+    uint64_t transmitted = 0;
+    const auto planned_transmissions = context.flow_count * context.clone_count;
 
-    while (flow_index < context.packet->flow_plan.planned_packets) {
-        const auto remaining = context.packet->flow_plan.planned_packets - flow_index;
+    while (transmitted < planned_transmissions) {
+        const auto remaining = planned_transmissions - transmitted;
         const auto count = static_cast<uint16_t>(std::min<uint64_t>(context.batch_size, remaining));
         if (rte_pktmbuf_alloc_bulk(context.mbuf_pool, batch.data(), count) != 0) {
             context.stats.errors.push_back(std::format("rte_pktmbuf_alloc_bulk failed for {} packet(s): {}",
@@ -368,7 +424,9 @@ int run_worker(void* arg) {
 
         uint16_t prepared_count = 0;
         for (; prepared_count < count; ++prepared_count) {
-            if (!prepare_batch_packet(context, *batch[prepared_count], flow_index + prepared_count)) {
+            const auto local_transmission = transmitted + prepared_count;
+            const auto flow_index = context.first_flow + local_transmission / context.clone_count;
+            if (!prepare_batch_packet(context, *batch[prepared_count], flow_index)) {
                 free_unsent(batch.data(), 0, count);
                 return 1;
             }
@@ -377,7 +435,7 @@ int run_worker(void* arg) {
         if (!transmit_batch(context, std::span{batch.data(), count})) {
             return 1;
         }
-        flow_index += count;
+        transmitted += count;
     }
 
     return 0;
@@ -397,6 +455,8 @@ Runtime::WorkerResult make_worker_result(const WorkerContext& context) {
         context.worker_id,
         context.lcore_id,
         context.queue_id,
+        context.first_flow,
+        context.flow_count,
         context.stats.tx_attempted,
         context.stats.tx_sent,
     };
@@ -407,12 +467,17 @@ bool transmit_on_main(uint16_t port_id,
                       const PacketGenerator& generator,
                       const GeneratedPacket& generated_packet,
                       uint16_t batch_size,
+                      const Runtime::RunOptions& options,
                       Runtime::Result& result) {
     WorkerContext context;
     context.worker_id = 0;
     context.lcore_id = rte_lcore_id();
     context.port_id = port_id;
     context.queue_id = 0;
+    const auto range = assigned_flow_range(generated_packet.flow_plan.planned_packets, 1, 0, options.split);
+    context.first_flow = range.first;
+    context.flow_count = range.count;
+    context.clone_count = options.clone_count;
     context.mbuf_pool = &mbuf_pool;
     context.generator = &generator;
     context.packet = &generated_packet;
@@ -432,6 +497,7 @@ bool transmit_on_workers(uint16_t port_id,
                          const GeneratedPacket& generated_packet,
                          uint16_t batch_size,
                          uint64_t requested_workers,
+                         const Runtime::RunOptions& options,
                          Runtime::Result& result) {
     auto lcores = worker_lcores();
     if (lcores.size() < requested_workers) {
@@ -452,6 +518,13 @@ bool transmit_on_workers(uint16_t port_id,
         context.lcore_id = lcores[worker];
         context.port_id = port_id;
         context.queue_id = static_cast<uint16_t>(worker);
+        const auto range = assigned_flow_range(generated_packet.flow_plan.planned_packets,
+                                               requested_workers,
+                                               worker,
+                                               options.split);
+        context.first_flow = range.first;
+        context.flow_count = range.count;
+        context.clone_count = options.clone_count;
         context.mbuf_pool = &mbuf_pool;
         context.generator = &generator;
         context.packet = &generated_packet;
@@ -707,6 +780,10 @@ std::optional<Runtime::Config> Runtime::checked_config(const Program& program, R
 }
 
 Runtime::Result Runtime::check(const Program& program) const {
+    return check(program, RunOptions{});
+}
+
+Runtime::Result Runtime::check(const Program& program, RunOptions options) const {
     Result result;
     auto config = build_config(program, result);
     if (!config) {
@@ -726,6 +803,15 @@ Runtime::Result Runtime::check(const Program& program) const {
     result.planned_packets = generated.packet->flow_plan.planned_packets;
     result.pmd_threads = config->pmd_threads.value_or(1);
     result.tx_batch_size = config->tx_batch_size;
+    result.clone_count = options.clone_count;
+    result.split = options.split;
+    result.planned_transmissions = checked_total_transmission_count(result.planned_packets,
+                                                                    result.pmd_threads,
+                                                                    options,
+                                                                    result);
+    if (!result.errors.empty()) {
+        return result;
+    }
     result.ok = true;
     return result;
 }
@@ -747,6 +833,12 @@ Runtime::Result Runtime::init(const Program& program, std::string_view eal_progr
 }
 
 Runtime::Result Runtime::run(const Program& program, std::string_view eal_program_name) {
+    return run(program, eal_program_name, RunOptions{});
+}
+
+Runtime::Result Runtime::run(const Program& program,
+                             std::string_view eal_program_name,
+                             RunOptions options) {
     Result result;
     auto config = build_config(program, result);
     if (!config) {
@@ -765,6 +857,16 @@ Runtime::Result Runtime::run(const Program& program, std::string_view eal_progra
     result.planned_packets = generated.packet->flow_plan.planned_packets;
     result.pmd_threads = config->pmd_threads.value_or(1);
     result.tx_batch_size = config->tx_batch_size;
+    result.clone_count = options.clone_count;
+    result.split = options.split;
+
+    result.planned_transmissions = checked_total_transmission_count(result.planned_packets,
+                                                                    result.pmd_threads,
+                                                                    options,
+                                                                    result);
+    if (!result.errors.empty()) {
+        return result;
+    }
 
     if (!check_tap_permission(result)) {
         result.ok = false;
@@ -805,6 +907,7 @@ Runtime::Result Runtime::run(const Program& program, std::string_view eal_progra
                                 *generated.packet,
                                 batch_size,
                                 *config->pmd_threads,
+                                options,
                                 result);
         } else {
             transmit_on_main(runtime_port_id,
@@ -812,6 +915,7 @@ Runtime::Result Runtime::run(const Program& program, std::string_view eal_progra
                              generator,
                              *generated.packet,
                              batch_size,
+                             options,
                              result);
         }
     }

@@ -114,11 +114,21 @@ def capture_runtime_packets(capture: socket.socket, expected_count: int, timeout
 
 @pytest.fixture
 def capture_packets(runtime_binary):
-    def run(program: Path, expected_count: int, *, timeout: float = 8.0, with_output: bool = False):
+    def run(
+        program: Path,
+        expected_count: int,
+        *,
+        timeout: float = 8.0,
+        with_output: bool = False,
+        runtime_args: Optional[list[str]] = None,
+    ):
+        args = [str(runtime_binary), str(program)]
+        if runtime_args:
+            args.extend(runtime_args)
         with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)) as capture:
             capture.setblocking(False)
             process = subprocess.Popen(
-                [str(runtime_binary), str(program)],
+                args,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

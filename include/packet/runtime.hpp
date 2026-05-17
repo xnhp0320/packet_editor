@@ -19,8 +19,15 @@ public:
         uint64_t worker_id = 0;
         uint64_t lcore_id = 0;
         uint16_t queue_id = 0;
+        uint64_t first_flow = 0;
+        uint64_t flow_count = 0;
         uint64_t tx_attempted = 0;
         uint64_t tx_sent = 0;
+    };
+
+    struct RunOptions {
+        uint64_t clone_count = 1;
+        bool split = false;
     };
 
     struct Result {
@@ -32,10 +39,13 @@ public:
         size_t packet_len = 0;
         uint64_t total_flows = 0;
         uint64_t planned_packets = 0;
+        uint64_t planned_transmissions = 0;
         uint64_t tx_attempted = 0;
         uint64_t tx_sent = 0;
         uint64_t pmd_threads = 0;
         uint64_t tx_batch_size = 0;
+        uint64_t clone_count = 1;
+        bool split = false;
         std::vector<WorkerResult> workers;
     };
 
@@ -43,8 +53,10 @@ public:
     explicit Runtime(Registry registry);
 
     Result check(const Program& program) const;
+    Result check(const Program& program, RunOptions options) const;
     Result init(const Program& program, std::string_view eal_program_name = "ffg");
     Result run(const Program& program, std::string_view eal_program_name = "ffg");
+    Result run(const Program& program, std::string_view eal_program_name, RunOptions options);
 
 private:
     struct Config {
