@@ -46,6 +46,11 @@ public:
                           std::vector<std::byte>& payload,
                           std::vector<std::string>& errors) const;
 
+    bool apply_flow(const GeneratedPacket& packet,
+                    uint64_t flow_index,
+                    std::span<std::byte> payload,
+                    std::vector<std::string>& errors) const;
+
 private:
     const Registry& registry_;
 };

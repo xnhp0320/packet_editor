@@ -48,9 +48,20 @@ Supported runtime variables:
 - `PACKET`: packet expression to validate, serialize, and transmit.
 - `PACKET_COUNT`: optional positive integer cap for the number of generated
   packets.
+- `PMD_THREADS`: optional positive integer for live mode. When set, DPDK must
+  expose at least that many worker lcores through `DPDK_ARGS`; for example,
+  `PMD_THREADS: 2` requires a lcore list such as `-l 0-2`.
+- `TX_BATCH_SIZE`: optional positive integer for live mode transmit batching.
+  The default is 32 and the current maximum is 256.
 
 Ranges are accepted for IPv4/IPv6 address fields and range-capable integer
 fields such as TCP/UDP ports.
+
+In multi-PMD live mode, each PMD worker emits the same planned range sequence in
+the first implementation. Mbufs are seeded with the base packet format when the
+mempool is created; workers allocate batches, reset cheap mbuf metadata, apply
+the range modifiers for each flow index, fix lengths/checksums, and transmit the
+batch.
 
 ## Build
 

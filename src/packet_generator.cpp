@@ -138,17 +138,34 @@ bool PacketGenerator::payload_for_flow(const GeneratedPacket& packet,
                                        uint64_t flow_index,
                                        std::vector<std::byte>& payload,
                                        std::vector<std::string>& errors) const {
-    if (flow_index >= packet.flow_plan.planned_packets) {
-        errors.push_back("flow index is outside the planned packet count");
+    if (packet.base_payload.size() != packet.packet_len) {
+        errors.push_back("base payload length does not match packet length");
         return false;
     }
 
     payload = packet.base_payload;
-    if (!apply_flow_index(payload, packet.modifiers, flow_index, errors)) {
+    return apply_flow(packet, flow_index, payload, errors);
+}
+
+bool PacketGenerator::apply_flow(const GeneratedPacket& packet,
+                                 uint64_t flow_index,
+                                 std::span<std::byte> payload,
+                                 std::vector<std::string>& errors) const {
+    if (flow_index >= packet.flow_plan.planned_packets) {
+        errors.push_back("flow index is outside the planned packet count");
+        return false;
+    }
+    if (payload.size() < packet.packet_len) {
+        errors.push_back("payload buffer is smaller than the packet length");
         return false;
     }
 
-    auto fixed = fixup_packet(packet.constructor, registry_, PacketBufferView{payload}, packet.packet_len);
+    auto packet_payload = payload.subspan(0, packet.packet_len);
+    if (!apply_flow_index(packet_payload, packet.modifiers, flow_index, errors)) {
+        return false;
+    }
+
+    auto fixed = fixup_packet(packet.constructor, registry_, PacketBufferView{packet_payload}, packet.packet_len);
     errors.insert(errors.end(), fixed.errors.begin(), fixed.errors.end());
     return fixed.ok;
 }

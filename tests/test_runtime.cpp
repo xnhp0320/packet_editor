@@ -102,6 +102,23 @@ PACKET: IP()/TCP(sport="[10000-10002]",dport="[20000-20001]"))");
     EXPECT_EQ(result.planned_packets, 6);
 }
 
+TEST(RuntimeTest, PmdThreadsAndBatchSizeAreRuntimeVariables) {
+    auto program = parse_program(R"(DPDK_ARGS: "--no-huge --no-pci -l 0-2"
+PMD_THREADS: 2
+TX_BATCH_SIZE: 16
+PACKET: IP(src="[10.0.0.1-10.0.0.2]",dst="[10.0.1.1-10.0.1.2]"))");
+
+    Runtime runtime;
+    auto result = runtime.check(program);
+
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+    EXPECT_EQ(result.total_flows, 4);
+    EXPECT_EQ(result.planned_packets, 4);
+    EXPECT_EQ(result.pmd_threads, 2);
+    EXPECT_EQ(result.tx_batch_size, 16);
+}
+
 TEST(RuntimeTest, PacketCountLargerThanRangeSendsOnePassOnly) {
     auto program = parse_program(R"(DPDK_ARGS: "--no-huge --no-pci -l 0"
 PACKET_COUNT: 10
@@ -114,6 +131,45 @@ PACKET: IP(src="10.0.0.1-10.0.0.3"))");
     EXPECT_TRUE(result.errors.empty());
     EXPECT_EQ(result.total_flows, 3);
     EXPECT_EQ(result.planned_packets, 3);
+}
+
+TEST(RuntimeTest, PmdThreadsMustBePositive) {
+    auto program = parse_program(R"(DPDK_ARGS: "--no-huge --no-pci -l 0"
+PMD_THREADS: 0
+PACKET: Ether())");
+
+    Runtime runtime;
+    auto result = runtime.check(program);
+
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.errors.size(), 1);
+    EXPECT_EQ(result.errors[0], "variable 'PMD_THREADS' must be positive");
+}
+
+TEST(RuntimeTest, TxBatchSizeMustBePositive) {
+    auto program = parse_program(R"(DPDK_ARGS: "--no-huge --no-pci -l 0"
+TX_BATCH_SIZE: 0
+PACKET: Ether())");
+
+    Runtime runtime;
+    auto result = runtime.check(program);
+
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.errors.size(), 1);
+    EXPECT_EQ(result.errors[0], "variable 'TX_BATCH_SIZE' must be positive");
+}
+
+TEST(RuntimeTest, TxBatchSizeIsCapped) {
+    auto program = parse_program(R"(DPDK_ARGS: "--no-huge --no-pci -l 0"
+TX_BATCH_SIZE: 257
+PACKET: Ether())");
+
+    Runtime runtime;
+    auto result = runtime.check(program);
+
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.errors.size(), 1);
+    EXPECT_EQ(result.errors[0], "variable 'TX_BATCH_SIZE' must be <= 256");
 }
 
 TEST(RuntimeTest, PacketCountMustBeInteger) {

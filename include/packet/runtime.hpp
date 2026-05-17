@@ -26,6 +26,8 @@ public:
         uint64_t planned_packets = 0;
         uint64_t tx_attempted = 0;
         uint64_t tx_sent = 0;
+        uint64_t pmd_threads = 0;
+        uint64_t tx_batch_size = 0;
     };
 
     Runtime();
@@ -40,6 +42,8 @@ private:
         Packet packet;
         std::vector<std::string> dpdk_args;
         std::optional<uint64_t> packet_count;
+        std::optional<uint64_t> pmd_threads;
+        uint64_t tx_batch_size = 32;
     };
 
     static std::optional<Config> build_config(const Program& program, Result& result);

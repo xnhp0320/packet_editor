@@ -6,13 +6,17 @@
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_errno.h>
+#include <rte_launch.h>
+#include <rte_lcore.h>
 #include <rte_mbuf.h>
 #include <rte_mempool.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstring>
 #include <format>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -38,8 +42,9 @@ constexpr uint16_t runtime_port_id = 0;
 constexpr uint16_t runtime_queue_id = 0;
 constexpr uint16_t runtime_rx_descriptors = 128;
 constexpr uint16_t runtime_tx_descriptors = 512;
-constexpr unsigned runtime_mbuf_count = 8191;
 constexpr unsigned runtime_mbuf_cache_size = 250;
+constexpr uint16_t runtime_default_tx_batch_size = 32;
+constexpr uint16_t runtime_max_tx_batch_size = 256;
 constexpr std::string_view runtime_tap_name = "net_tap0";
 constexpr std::string_view runtime_tap_args = "iface=packet_tap0,mac=fixed";
 constexpr std::string_view runtime_tap_iface = "packet_tap0";
@@ -90,6 +95,35 @@ struct MempoolDeleter {
 
 using MempoolPtr = std::unique_ptr<rte_mempool, MempoolDeleter>;
 
+struct MempoolSeedContext {
+    std::span<const std::byte> base_payload;
+    uint32_t seeded = 0;
+};
+
+void seed_mbuf_base_payload(rte_mempool*, void* opaque, void* object, unsigned) {
+    auto& context = *static_cast<MempoolSeedContext*>(opaque);
+    auto* mbuf = static_cast<rte_mbuf*>(object);
+    void* packet_data = rte_pktmbuf_mtod(mbuf, void*);
+    std::memcpy(packet_data, context.base_payload.data(), context.base_payload.size());
+    ++context.seeded;
+}
+
+struct WorkerStats {
+    uint64_t tx_attempted = 0;
+    uint64_t tx_sent = 0;
+    std::vector<std::string> errors;
+};
+
+struct WorkerContext {
+    uint16_t port_id = 0;
+    uint16_t queue_id = 0;
+    rte_mempool* mbuf_pool = nullptr;
+    const PacketGenerator* generator = nullptr;
+    const GeneratedPacket* packet = nullptr;
+    uint16_t batch_size = runtime_default_tx_batch_size;
+    WorkerStats stats;
+};
+
 #ifdef __linux__
 class Fd {
 public:
@@ -116,9 +150,17 @@ private:
 };
 #endif
 
-MempoolPtr make_mbuf_pool(Runtime::Result& result) {
+unsigned mbuf_count_for(uint64_t worker_count, uint16_t batch_size) {
+    const auto in_flight = worker_count * (runtime_tx_descriptors + batch_size * 2ull);
+    return static_cast<unsigned>(std::max<uint64_t>(8191, in_flight + runtime_mbuf_cache_size));
+}
+
+MempoolPtr make_mbuf_pool(const GeneratedPacket& packet,
+                          uint64_t worker_count,
+                          uint16_t batch_size,
+                          Runtime::Result& result) {
     rte_mempool* pool = rte_pktmbuf_pool_create("packet_runtime_mbuf_pool",
-                                                runtime_mbuf_count,
+                                                mbuf_count_for(worker_count, batch_size),
                                                 runtime_mbuf_cache_size,
                                                 0,
                                                 RTE_MBUF_DEFAULT_BUF_SIZE,
@@ -126,6 +168,13 @@ MempoolPtr make_mbuf_pool(Runtime::Result& result) {
     if (pool == nullptr) {
         result.errors.push_back(std::format("rte_pktmbuf_pool_create failed: {}",
                                             rte_strerror(rte_errno)));
+        return MempoolPtr{pool};
+    }
+
+    MempoolSeedContext seed{packet.base_payload};
+    const auto iterated = rte_mempool_obj_iter(pool, seed_mbuf_base_payload, &seed);
+    if (iterated == 0 || seed.seeded != iterated) {
+        result.errors.push_back("failed to seed packet base payload into the mbuf pool");
     }
     return MempoolPtr{pool};
 }
@@ -164,7 +213,10 @@ bool probe_tap_port(Runtime::Result& result) {
     return true;
 }
 
-bool configure_and_start_port(uint16_t port_id, rte_mempool& mbuf_pool, Runtime::Result& result) {
+bool configure_and_start_port(uint16_t port_id,
+                              uint16_t tx_queue_count,
+                              rte_mempool& mbuf_pool,
+                              Runtime::Result& result) {
     const uint16_t port_count = rte_eth_dev_count_avail();
     if (port_count == 0) {
         result.errors.emplace_back("no DPDK ethdev ports are available");
@@ -178,7 +230,7 @@ bool configure_and_start_port(uint16_t port_id, rte_mempool& mbuf_pool, Runtime:
     }
 
     rte_eth_conf port_conf{};
-    int rc = rte_eth_dev_configure(port_id, 1, 1, &port_conf);
+    int rc = rte_eth_dev_configure(port_id, 1, tx_queue_count, &port_conf);
     if (rc < 0) {
         result.errors.push_back(std::format("rte_eth_dev_configure failed for port {}: {}",
                                             port_id,
@@ -200,17 +252,19 @@ bool configure_and_start_port(uint16_t port_id, rte_mempool& mbuf_pool, Runtime:
         return false;
     }
 
-    rc = rte_eth_tx_queue_setup(port_id,
-                                runtime_queue_id,
-                                runtime_tx_descriptors,
-                                rte_eth_dev_socket_id(port_id),
-                                nullptr);
-    if (rc < 0) {
-        result.errors.push_back(std::format("rte_eth_tx_queue_setup failed for port {} queue {}: {}",
-                                            port_id,
-                                            runtime_queue_id,
-                                            rte_strerror(-rc)));
-        return false;
+    for (uint16_t queue_id = 0; queue_id < tx_queue_count; ++queue_id) {
+        rc = rte_eth_tx_queue_setup(port_id,
+                                    queue_id,
+                                    runtime_tx_descriptors,
+                                    rte_eth_dev_socket_id(port_id),
+                                    nullptr);
+        if (rc < 0) {
+            result.errors.push_back(std::format("rte_eth_tx_queue_setup failed for port {} queue {}: {}",
+                                                port_id,
+                                                queue_id,
+                                                rte_strerror(-rc)));
+            return false;
+        }
     }
 
     rc = rte_eth_dev_start(port_id);
@@ -225,54 +279,192 @@ bool configure_and_start_port(uint16_t port_id, rte_mempool& mbuf_pool, Runtime:
     return true;
 }
 
-bool transmit_packet(uint16_t port_id,
-                     rte_mempool& mbuf_pool,
-                     std::span<const std::byte> payload,
-                     Runtime::Result& result) {
-    rte_mbuf* mbuf = rte_pktmbuf_alloc(&mbuf_pool);
-    if (mbuf == nullptr) {
-        result.errors.push_back(std::format("rte_pktmbuf_alloc failed: {}", rte_strerror(rte_errno)));
-        return false;
+void free_unsent(rte_mbuf** packets, uint16_t begin, uint16_t end) {
+    for (uint16_t index = begin; index < end; ++index) {
+        rte_pktmbuf_free(packets[index]);
     }
-
-    void* packet_data = rte_pktmbuf_append(mbuf, static_cast<uint16_t>(payload.size()));
-    if (packet_data == nullptr) {
-        rte_pktmbuf_free(mbuf);
-        result.errors.push_back(std::format("packet length {} does not fit in an mbuf", payload.size()));
-        return false;
-    }
-
-    std::memcpy(packet_data, payload.data(), payload.size());
-
-    rte_mbuf* packets[] = {mbuf};
-    ++result.tx_attempted;
-    const uint16_t sent = rte_eth_tx_burst(port_id, runtime_queue_id, packets, 1);
-    result.tx_sent += sent;
-    if (sent != 1) {
-        rte_pktmbuf_free(mbuf);
-        result.errors.push_back("rte_eth_tx_burst sent 0 of 1 packet(s)");
-        return false;
-    }
-
-    return true;
 }
 
-bool transmit_planned_packets(uint16_t port_id,
-                              rte_mempool& mbuf_pool,
-                              const PacketGenerator& generator,
-                              const GeneratedPacket& generated_packet,
-                              Runtime::Result& result) {
-    for (uint64_t flow_index = 0; flow_index < generated_packet.flow_plan.planned_packets; ++flow_index) {
-        std::vector<std::byte> payload;
-        if (!generator.payload_for_flow(generated_packet, flow_index, payload, result.errors)) {
-            return false;
-        }
+bool prepare_batch_packet(WorkerContext& context,
+                          rte_mbuf& mbuf,
+                          uint64_t flow_index) {
+    void* packet_data = rte_pktmbuf_append(&mbuf, static_cast<uint16_t>(context.packet->packet_len));
+    if (packet_data == nullptr) {
+        context.stats.errors.push_back(std::format("packet length {} does not fit in an mbuf",
+                                                   context.packet->packet_len));
+        return false;
+    }
 
-        if (!transmit_packet(port_id, mbuf_pool, payload, result)) {
+    mbuf.ol_flags = 0;
+    mbuf.l2_len = 0;
+    mbuf.l3_len = 0;
+    mbuf.l4_len = 0;
+
+    auto payload = std::span{static_cast<std::byte*>(packet_data), context.packet->packet_len};
+    return context.generator->apply_flow(*context.packet, flow_index, payload, context.stats.errors);
+}
+
+bool transmit_batch(WorkerContext& context,
+                    std::span<rte_mbuf*> packets) {
+    const auto packet_count = static_cast<uint16_t>(packets.size());
+    context.stats.tx_attempted += packet_count;
+
+    const uint16_t prepared = rte_eth_tx_prepare(context.port_id,
+                                                context.queue_id,
+                                                packets.data(),
+                                                packet_count);
+    if (prepared != packet_count) {
+        free_unsent(packets.data(), prepared, packet_count);
+        context.stats.errors.push_back(std::format("rte_eth_tx_prepare prepared {} of {} packet(s)",
+                                                   prepared,
+                                                   packet_count));
+        if (prepared == 0) {
             return false;
         }
     }
-    return true;
+
+    uint16_t sent_total = 0;
+    while (sent_total < prepared) {
+        const uint16_t sent = rte_eth_tx_burst(context.port_id,
+                                              context.queue_id,
+                                              packets.data() + sent_total,
+                                              static_cast<uint16_t>(prepared - sent_total));
+        if (sent == 0) {
+            break;
+        }
+        sent_total += sent;
+    }
+
+    context.stats.tx_sent += sent_total;
+    if (sent_total != prepared) {
+        free_unsent(packets.data(), sent_total, prepared);
+        context.stats.errors.push_back(std::format("rte_eth_tx_burst sent {} of {} prepared packet(s)",
+                                                   sent_total,
+                                                   prepared));
+        return false;
+    }
+
+    return prepared == packet_count;
+}
+
+int run_worker(void* arg) {
+    auto& context = *static_cast<WorkerContext*>(arg);
+    std::array<rte_mbuf*, runtime_max_tx_batch_size> batch{};
+    uint64_t flow_index = 0;
+
+    while (flow_index < context.packet->flow_plan.planned_packets) {
+        const auto remaining = context.packet->flow_plan.planned_packets - flow_index;
+        const auto count = static_cast<uint16_t>(std::min<uint64_t>(context.batch_size, remaining));
+        if (rte_pktmbuf_alloc_bulk(context.mbuf_pool, batch.data(), count) != 0) {
+            context.stats.errors.push_back(std::format("rte_pktmbuf_alloc_bulk failed for {} packet(s): {}",
+                                                       count,
+                                                       rte_strerror(rte_errno)));
+            return 1;
+        }
+
+        uint16_t prepared_count = 0;
+        for (; prepared_count < count; ++prepared_count) {
+            if (!prepare_batch_packet(context, *batch[prepared_count], flow_index + prepared_count)) {
+                free_unsent(batch.data(), 0, count);
+                return 1;
+            }
+        }
+
+        if (!transmit_batch(context, std::span{batch.data(), count})) {
+            return 1;
+        }
+        flow_index += count;
+    }
+
+    return 0;
+}
+
+std::vector<unsigned> worker_lcores() {
+    std::vector<unsigned> lcores;
+    unsigned lcore_id = 0;
+    RTE_LCORE_FOREACH_WORKER(lcore_id) {
+        lcores.push_back(lcore_id);
+    }
+    return lcores;
+}
+
+bool transmit_on_main(uint16_t port_id,
+                      rte_mempool& mbuf_pool,
+                      const PacketGenerator& generator,
+                      const GeneratedPacket& generated_packet,
+                      uint16_t batch_size,
+                      Runtime::Result& result) {
+    WorkerContext context;
+    context.port_id = port_id;
+    context.queue_id = 0;
+    context.mbuf_pool = &mbuf_pool;
+    context.generator = &generator;
+    context.packet = &generated_packet;
+    context.batch_size = batch_size;
+
+    const auto rc = run_worker(&context);
+    result.tx_attempted += context.stats.tx_attempted;
+    result.tx_sent += context.stats.tx_sent;
+    result.errors.insert(result.errors.end(), context.stats.errors.begin(), context.stats.errors.end());
+    return rc == 0;
+}
+
+bool transmit_on_workers(uint16_t port_id,
+                         rte_mempool& mbuf_pool,
+                         const PacketGenerator& generator,
+                         const GeneratedPacket& generated_packet,
+                         uint16_t batch_size,
+                         uint64_t requested_workers,
+                         Runtime::Result& result) {
+    auto lcores = worker_lcores();
+    if (lcores.size() < requested_workers) {
+        result.errors.push_back(std::format("PMD_THREADS requests {} worker lcore(s), but DPDK_ARGS enabled {}; use DPDK_ARGS like \"-l 0-{}\"",
+                                            requested_workers,
+                                            lcores.size(),
+                                            requested_workers));
+        return false;
+    }
+
+    std::vector<WorkerContext> contexts;
+    contexts.reserve(static_cast<size_t>(requested_workers));
+    uint64_t launched = 0;
+    bool ok = true;
+    for (uint64_t worker = 0; worker < requested_workers; ++worker) {
+        auto& context = contexts.emplace_back();
+        context.port_id = port_id;
+        context.queue_id = static_cast<uint16_t>(worker);
+        context.mbuf_pool = &mbuf_pool;
+        context.generator = &generator;
+        context.packet = &generated_packet;
+        context.batch_size = batch_size;
+
+        const int rc = rte_eal_remote_launch(run_worker, &context, lcores[worker]);
+        if (rc < 0) {
+            result.errors.push_back(std::format("rte_eal_remote_launch failed for lcore {}: {}",
+                                                lcores[worker],
+                                                rte_strerror(-rc)));
+            ok = false;
+            break;
+        }
+        ++launched;
+    }
+
+    for (uint64_t worker = 0; worker < launched; ++worker) {
+        const int rc = rte_eal_wait_lcore(lcores[worker]);
+        if (rc != 0) {
+            ok = false;
+            result.errors.push_back(std::format("PMD worker on lcore {} failed with code {}",
+                                                lcores[worker],
+                                                rc));
+        }
+    }
+
+    for (const auto& context : contexts) {
+        result.tx_attempted += context.stats.tx_attempted;
+        result.tx_sent += context.stats.tx_sent;
+        result.errors.insert(result.errors.end(), context.stats.errors.begin(), context.stats.errors.end());
+    }
+    return ok;
 }
 
 void stop_and_close_port(uint16_t port_id, Runtime::Result& result) {
@@ -427,9 +619,45 @@ std::optional<Runtime::Config> Runtime::build_config(const Program& program, Res
         }
     }
 
+    auto pmd_threads_it = variables.find("PMD_THREADS");
+    if (pmd_threads_it != variables.end()) {
+        auto pmd_threads_value = evaluate(pmd_threads_it->second->expression);
+        if (!std::holds_alternative<int64_t>(pmd_threads_value)) {
+            result.errors.emplace_back("variable 'PMD_THREADS' must be an integer expression");
+        } else {
+            const auto pmd_threads = std::get<int64_t>(pmd_threads_value);
+            if (pmd_threads <= 0) {
+                result.errors.emplace_back("variable 'PMD_THREADS' must be positive");
+            } else if (pmd_threads > std::numeric_limits<uint16_t>::max()) {
+                result.errors.emplace_back("variable 'PMD_THREADS' exceeds the supported Tx queue count");
+            } else {
+                config.pmd_threads = static_cast<uint64_t>(pmd_threads);
+            }
+        }
+    }
+
+    auto tx_batch_size_it = variables.find("TX_BATCH_SIZE");
+    if (tx_batch_size_it != variables.end()) {
+        auto tx_batch_size_value = evaluate(tx_batch_size_it->second->expression);
+        if (!std::holds_alternative<int64_t>(tx_batch_size_value)) {
+            result.errors.emplace_back("variable 'TX_BATCH_SIZE' must be an integer expression");
+        } else {
+            const auto tx_batch_size = std::get<int64_t>(tx_batch_size_value);
+            if (tx_batch_size <= 0) {
+                result.errors.emplace_back("variable 'TX_BATCH_SIZE' must be positive");
+            } else if (tx_batch_size > runtime_max_tx_batch_size) {
+                result.errors.push_back(std::format("variable 'TX_BATCH_SIZE' must be <= {}",
+                                                    runtime_max_tx_batch_size));
+            } else {
+                config.tx_batch_size = static_cast<uint64_t>(tx_batch_size);
+            }
+        }
+    }
+
     for (const auto& variable : program.variables) {
         if (variable.name != "PACKET" && variable.name != "DPDK_ARGS" &&
-            variable.name != "PACKET_COUNT") {
+            variable.name != "PACKET_COUNT" && variable.name != "PMD_THREADS" &&
+            variable.name != "TX_BATCH_SIZE") {
             result.warnings.push_back(std::format("unknown runtime variable '{}'", variable.name));
         }
     }
@@ -476,6 +704,8 @@ Runtime::Result Runtime::check(const Program& program) const {
     result.packet_len = generated.packet->packet_len;
     result.total_flows = generated.packet->flow_plan.total_flows;
     result.planned_packets = generated.packet->flow_plan.planned_packets;
+    result.pmd_threads = config->pmd_threads.value_or(1);
+    result.tx_batch_size = config->tx_batch_size;
     result.ok = true;
     return result;
 }
@@ -513,6 +743,8 @@ Runtime::Result Runtime::run(const Program& program, std::string_view eal_progra
     result.packet_len = generated.packet->packet_len;
     result.total_flows = generated.packet->flow_plan.total_flows;
     result.planned_packets = generated.packet->flow_plan.planned_packets;
+    result.pmd_threads = config->pmd_threads.value_or(1);
+    result.tx_batch_size = config->tx_batch_size;
 
     if (!check_tap_permission(result)) {
         result.ok = false;
@@ -524,17 +756,44 @@ Runtime::Result Runtime::run(const Program& program, std::string_view eal_progra
         return result;
     }
 
+    if (config->pmd_threads) {
+        const auto lcores = worker_lcores();
+        if (lcores.size() < *config->pmd_threads) {
+            result.errors.push_back(std::format("PMD_THREADS requests {} worker lcore(s), but DPDK_ARGS enabled {}; use DPDK_ARGS like \"-l 0-{}\"",
+                                                *config->pmd_threads,
+                                                lcores.size(),
+                                                *config->pmd_threads));
+            cleanup_eal(result);
+            result.ok = false;
+            return result;
+        }
+    }
+
     bool port_started = false;
-    auto mbuf_pool = make_mbuf_pool(result);
+    const auto worker_count = config->pmd_threads.value_or(1);
+    const auto tx_queue_count = static_cast<uint16_t>(worker_count);
+    const auto batch_size = static_cast<uint16_t>(config->tx_batch_size);
+    auto mbuf_pool = make_mbuf_pool(*generated.packet, worker_count, batch_size, result);
     if (mbuf_pool != nullptr &&
         probe_tap_port(result) &&
-        configure_and_start_port(runtime_port_id, *mbuf_pool, result)) {
+        configure_and_start_port(runtime_port_id, tx_queue_count, *mbuf_pool, result)) {
         port_started = true;
-        transmit_planned_packets(runtime_port_id,
-                                 *mbuf_pool,
-                                 generator,
-                                 *generated.packet,
-                                 result);
+        if (config->pmd_threads) {
+            transmit_on_workers(runtime_port_id,
+                                *mbuf_pool,
+                                generator,
+                                *generated.packet,
+                                batch_size,
+                                *config->pmd_threads,
+                                result);
+        } else {
+            transmit_on_main(runtime_port_id,
+                             *mbuf_pool,
+                             generator,
+                             *generated.packet,
+                             batch_size,
+                             result);
+        }
     }
 
     if (port_started) {

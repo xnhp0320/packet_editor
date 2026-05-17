@@ -340,7 +340,9 @@ int run_live_mode(const CliOptions& options, char** argv) {
               << result.port_id << " sent " << result.tx_sent << '/'
               << result.tx_attempted << " packet(s), planned "
               << result.planned_packets << " of " << result.total_flows
-              << " flow(s), packet_len " << result.packet_len << " bytes\n";
+              << " flow(s), packet_len " << result.packet_len
+              << " bytes, pmd_threads " << result.pmd_threads
+              << ", tx_batch_size " << result.tx_batch_size << '\n';
     return 0;
 #else
     std::cerr << "ERROR: live mode requires a build with PACKET_BUILD_DPDK=ON\n";

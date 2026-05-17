@@ -64,6 +64,36 @@ TEST(FileModeTest, PacketGeneratorProducesPerFlowPayloads) {
     EXPECT_EQ(std::to_integer<uint8_t>(payload[15]), 3);
 }
 
+TEST(FileModeTest, PacketGeneratorAppliesFlowIntoPrefilledBufferRepeatedly) {
+    Registry registry;
+    PacketGenerator generator{registry};
+    auto result = generator.prepare(parse_packet(R"(IP(src="[10.0.0.1-10.0.0.2]",dst="10.0.1.1")/UDP(sport="[10000-10001]",dport=53))"));
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.packet.has_value());
+    EXPECT_EQ(result.packet->flow_plan.total_flows, 4);
+
+    auto reusable_payload = result.packet->base_payload;
+    std::vector<std::byte> first_expected;
+    std::vector<std::byte> last_expected;
+
+    ASSERT_TRUE(generator.payload_for_flow(*result.packet, 0, first_expected, result.errors));
+    ASSERT_TRUE(result.errors.empty());
+    ASSERT_TRUE(generator.payload_for_flow(*result.packet, 3, last_expected, result.errors));
+    ASSERT_TRUE(result.errors.empty());
+
+    ASSERT_TRUE(generator.apply_flow(*result.packet, 0, reusable_payload, result.errors));
+    ASSERT_TRUE(result.errors.empty());
+    EXPECT_EQ(reusable_payload, first_expected);
+
+    ASSERT_TRUE(generator.apply_flow(*result.packet, 3, reusable_payload, result.errors));
+    ASSERT_TRUE(result.errors.empty());
+    EXPECT_EQ(reusable_payload, last_expected);
+
+    ASSERT_TRUE(generator.apply_flow(*result.packet, 0, reusable_payload, result.errors));
+    ASSERT_TRUE(result.errors.empty());
+    EXPECT_EQ(reusable_payload, first_expected);
+}
+
 TEST(FileModeTest, PcapWriterWritesClassicEthernetPcap) {
     std::ostringstream output;
     PcapWriter writer{output};
