@@ -30,6 +30,7 @@ struct CliOptions {
     std::optional<uint64_t> packet_count;
     uint64_t clone_count = 1;
     bool split = false;
+    bool once = false;
     std::vector<std::string> errors;
 };
 
@@ -54,7 +55,7 @@ void print_usage(std::string_view program_name) {
     std::cerr << "usage:\n"
               << "  " << program_name << " <program-file>\n"
               << "  " << program_name << " <program-file> -o <pcap-file>\n"
-              << "  " << program_name << " <program-file> [--clone <count>] [--split]\n"
+              << "  " << program_name << " <program-file> [--clone <count>] [--split] [--once]\n"
               << "  " << program_name << " -e <packet-expression> -o <pcap-file> [-c <count>] [--clone <count>]\n";
 }
 
@@ -131,6 +132,8 @@ CliOptions parse_cli(int argc, char** argv) {
             options.clone_count = *count;
         } else if (arg == "--split") {
             options.split = true;
+        } else if (arg == "--once") {
+            options.once = true;
         } else if (!arg.empty() && arg.front() == '-') {
             options.errors.push_back("unknown option '" + std::string{arg} + "'");
         } else {
@@ -257,6 +260,10 @@ int run_file_mode(const CliOptions& options) {
         std::cerr << "ERROR: --split is only valid in live mode\n";
         return 2;
     }
+    if (options.once) {
+        std::cerr << "ERROR: --once is only valid in live mode\n";
+        return 2;
+    }
     if (options.positional.size() > 1) {
         std::cerr << "ERROR: file mode accepts at most one program file\n";
         return 2;
@@ -374,6 +381,7 @@ int run_live_mode(const CliOptions& options, char** argv) {
     packet::Runtime::RunOptions run_options;
     run_options.clone_count = options.clone_count;
     run_options.split = options.split;
+    run_options.once = options.once;
     auto result = runtime.run(*program, argv[0], run_options);
     print_runtime_messages(result);
     if (!result.ok) {
@@ -390,7 +398,8 @@ int run_live_mode(const CliOptions& options, char** argv) {
               << ", tx_batch_size " << result.tx_batch_size
               << ", clone_count " << result.clone_count
               << ", split " << (result.split ? "on" : "off")
-              << ", planned_transmissions " << result.planned_transmissions << '\n';
+              << ", once " << (result.once ? "on" : "off")
+              << ", planned_transmissions_per_cycle " << result.planned_transmissions << '\n';
     for (const auto& worker : result.workers) {
         std::cout << "PMD worker " << worker.worker_id
                   << " lcore " << worker.lcore_id

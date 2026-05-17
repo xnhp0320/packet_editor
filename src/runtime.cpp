@@ -13,7 +13,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
+#include <csignal>
 #include <cstring>
 #include <format>
 #include <limits>
@@ -48,6 +50,35 @@ constexpr uint16_t runtime_max_tx_batch_size = 256;
 constexpr std::string_view runtime_tap_name = "net_tap0";
 constexpr std::string_view runtime_tap_args = "iface=packet_tap0,mac=fixed";
 constexpr std::string_view runtime_tap_iface = "packet_tap0";
+
+std::atomic_bool runtime_stop_requested = false;
+
+void request_runtime_stop(int) {
+    runtime_stop_requested.store(true, std::memory_order_relaxed);
+}
+
+class SignalGuard {
+public:
+    SignalGuard() {
+        runtime_stop_requested.store(false, std::memory_order_relaxed);
+        old_int_ = std::signal(SIGINT, request_runtime_stop);
+        old_term_ = std::signal(SIGTERM, request_runtime_stop);
+    }
+
+    SignalGuard(const SignalGuard&) = delete;
+    SignalGuard& operator=(const SignalGuard&) = delete;
+
+    ~SignalGuard() {
+        std::signal(SIGINT, old_int_);
+        std::signal(SIGTERM, old_term_);
+    }
+
+private:
+    using Handler = void (*)(int);
+
+    Handler old_int_ = SIG_DFL;
+    Handler old_term_ = SIG_DFL;
+};
 
 std::vector<char*> make_eal_argv(std::vector<std::string>& argv_storage) {
     std::vector<char*> argv;
@@ -122,6 +153,8 @@ struct WorkerContext {
     uint64_t first_flow = 0;
     uint64_t flow_count = 0;
     uint64_t clone_count = 1;
+    bool once = false;
+    const std::atomic_bool* stop_requested = nullptr;
     rte_mempool* mbuf_pool = nullptr;
     const PacketGenerator* generator = nullptr;
     const GeneratedPacket* packet = nullptr;
@@ -409,34 +442,43 @@ FlowRange assigned_flow_range(uint64_t planned_flows,
 int run_worker(void* arg) {
     auto& context = *static_cast<WorkerContext*>(arg);
     std::array<rte_mbuf*, runtime_max_tx_batch_size> batch{};
-    uint64_t transmitted = 0;
     const auto planned_transmissions = context.flow_count * context.clone_count;
+    if (planned_transmissions == 0) {
+        return 0;
+    }
 
-    while (transmitted < planned_transmissions) {
-        const auto remaining = planned_transmissions - transmitted;
-        const auto count = static_cast<uint16_t>(std::min<uint64_t>(context.batch_size, remaining));
-        if (rte_pktmbuf_alloc_bulk(context.mbuf_pool, batch.data(), count) != 0) {
-            context.stats.errors.push_back(std::format("rte_pktmbuf_alloc_bulk failed for {} packet(s): {}",
-                                                       count,
-                                                       rte_strerror(rte_errno)));
-            return 1;
-        }
-
-        uint16_t prepared_count = 0;
-        for (; prepared_count < count; ++prepared_count) {
-            const auto local_transmission = transmitted + prepared_count;
-            const auto flow_index = context.first_flow + local_transmission / context.clone_count;
-            if (!prepare_batch_packet(context, *batch[prepared_count], flow_index)) {
-                free_unsent(batch.data(), 0, count);
+    do {
+        uint64_t transmitted = 0;
+        while (transmitted < planned_transmissions &&
+               (context.stop_requested == nullptr ||
+                !context.stop_requested->load(std::memory_order_relaxed))) {
+            const auto remaining = planned_transmissions - transmitted;
+            const auto count = static_cast<uint16_t>(std::min<uint64_t>(context.batch_size, remaining));
+            if (rte_pktmbuf_alloc_bulk(context.mbuf_pool, batch.data(), count) != 0) {
+                context.stats.errors.push_back(std::format("rte_pktmbuf_alloc_bulk failed for {} packet(s): {}",
+                                                           count,
+                                                           rte_strerror(rte_errno)));
                 return 1;
             }
-        }
 
-        if (!transmit_batch(context, std::span{batch.data(), count})) {
-            return 1;
+            uint16_t prepared_count = 0;
+            for (; prepared_count < count; ++prepared_count) {
+                const auto local_transmission = transmitted + prepared_count;
+                const auto flow_index = context.first_flow + local_transmission / context.clone_count;
+                if (!prepare_batch_packet(context, *batch[prepared_count], flow_index)) {
+                    free_unsent(batch.data(), 0, count);
+                    return 1;
+                }
+            }
+
+            if (!transmit_batch(context, std::span{batch.data(), count})) {
+                return 1;
+            }
+            transmitted += count;
         }
-        transmitted += count;
-    }
+    } while (!context.once &&
+             (context.stop_requested == nullptr ||
+              !context.stop_requested->load(std::memory_order_relaxed)));
 
     return 0;
 }
@@ -478,6 +520,8 @@ bool transmit_on_main(uint16_t port_id,
     context.first_flow = range.first;
     context.flow_count = range.count;
     context.clone_count = options.clone_count;
+    context.once = options.once;
+    context.stop_requested = &runtime_stop_requested;
     context.mbuf_pool = &mbuf_pool;
     context.generator = &generator;
     context.packet = &generated_packet;
@@ -525,6 +569,8 @@ bool transmit_on_workers(uint16_t port_id,
         context.first_flow = range.first;
         context.flow_count = range.count;
         context.clone_count = options.clone_count;
+        context.once = options.once;
+        context.stop_requested = &runtime_stop_requested;
         context.mbuf_pool = &mbuf_pool;
         context.generator = &generator;
         context.packet = &generated_packet;
@@ -805,6 +851,7 @@ Runtime::Result Runtime::check(const Program& program, RunOptions options) const
     result.tx_batch_size = config->tx_batch_size;
     result.clone_count = options.clone_count;
     result.split = options.split;
+    result.once = options.once;
     result.planned_transmissions = checked_total_transmission_count(result.planned_packets,
                                                                     result.pmd_threads,
                                                                     options,
@@ -859,6 +906,7 @@ Runtime::Result Runtime::run(const Program& program,
     result.tx_batch_size = config->tx_batch_size;
     result.clone_count = options.clone_count;
     result.split = options.split;
+    result.once = options.once;
 
     result.planned_transmissions = checked_total_transmission_count(result.planned_packets,
                                                                     result.pmd_threads,
@@ -895,6 +943,7 @@ Runtime::Result Runtime::run(const Program& program,
     const auto worker_count = config->pmd_threads.value_or(1);
     const auto queue_count = static_cast<uint16_t>(worker_count);
     const auto batch_size = static_cast<uint16_t>(config->tx_batch_size);
+    SignalGuard signal_guard;
     auto mbuf_pool = make_mbuf_pool(*generated.packet, worker_count, batch_size, result);
     if (mbuf_pool != nullptr &&
         probe_tap_port(result) &&

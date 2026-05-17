@@ -28,6 +28,7 @@ public:
     struct RunOptions {
         uint64_t clone_count = 1;
         bool split = false;
+        bool once = false;
     };
 
     struct Result {
@@ -46,6 +47,7 @@ public:
         uint64_t tx_batch_size = 0;
         uint64_t clone_count = 1;
         bool split = false;
+        bool once = false;
         std::vector<WorkerResult> workers;
     };
 

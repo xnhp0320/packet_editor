@@ -113,17 +113,20 @@ Run a packet program with the DPDK tap runtime:
 ```sh
 ./build/ffg examples/tap_runtime.packet
 ./build/ffg examples/tap_runtime.packet --clone 4
+./build/ffg examples/tap_runtime.packet --once
 ```
 
 The current tap runtime creates the tap interface `packet_tap0`. Creating and
 capturing from tap interfaces generally requires root or equivalent network
 capabilities.
 
-`--clone N` sends `N` copies of each generated packet format before advancing
-to the next range value. With multiple `PMD_THREADS`, workers duplicate the
-planned range by default. Add `--split` to partition the planned flow formats
-across PMD workers instead; when the range count is not divisible by the worker
-count, earlier workers receive one extra flow format.
+Live mode runs continuously by default: each worker cycles through the planned
+range, applies `--clone N` copies for each generated packet format, and then
+starts the range again. Use `--once` for finite test-style runs that transmit
+one pass and exit. With multiple `PMD_THREADS`, workers duplicate the planned
+range by default. Add `--split` to partition the planned flow formats across
+PMD workers instead; when the range count is not divisible by the worker count,
+earlier workers receive one extra flow format.
 
 Write generated packets to a pcap file without starting DPDK:
 

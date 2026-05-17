@@ -141,6 +141,7 @@ def test_multi_pmd_workers_emit_duplicate_cartesian_ranges(packet_program, captu
     assert all(count == 2 for count in flows.values())
     assert "pmd_threads 2" in result.stdout
     assert "tx_batch_size 4" in result.stdout
+    assert "once on" in result.stdout
 
     workers = [
         {

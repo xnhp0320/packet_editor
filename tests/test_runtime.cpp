@@ -178,6 +178,21 @@ PACKET: IP(src="[10.0.0.1-10.0.0.3]"))");
     EXPECT_EQ(result.planned_transmissions, 6);
 }
 
+TEST(RuntimeTest, OnceOptionIsReported) {
+    auto program = parse_program(R"(DPDK_ARGS: "--no-huge --no-pci -l 0"
+PACKET: Ether())");
+
+    Runtime runtime;
+    Runtime::RunOptions options;
+    options.once = true;
+    auto result = runtime.check(program, options);
+
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+    EXPECT_TRUE(result.once);
+    EXPECT_EQ(result.planned_transmissions, 1);
+}
+
 TEST(RuntimeTest, CloneCountMustBePositive) {
     auto program = parse_program(R"(DPDK_ARGS: "--no-huge --no-pci -l 0"
 PACKET: Ether())");

@@ -122,7 +122,7 @@ def capture_packets(runtime_binary):
         with_output: bool = False,
         runtime_args: Optional[list[str]] = None,
     ):
-        args = [str(runtime_binary), str(program)]
+        args = [str(runtime_binary), str(program), "--once"]
         if runtime_args:
             args.extend(runtime_args)
         with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)) as capture:
