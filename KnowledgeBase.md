@@ -23,9 +23,10 @@ reintroducing libpcap into the static DPDK link.
 
 ## Static linking and binary portability
 
-A project goal is to produce a self-contained `ffg` binary via static linking.
-This allows the same binary to run on different servers with different OS
-versions without requiring matching system libraries at runtime.
+A project goal is to produce a mostly self-contained `ffg` binary via static
+linking. The deployment build statically links the C++ runtime and bundled DPDK
+archives, while keeping glibc dynamic so the binary remains compatible with the
+supported production distro family.
 
 All external dependencies (DPDK, GoogleTest) are built from source alongside the
 project to avoid accidental dynamic linkage against system-provided versions.
@@ -33,7 +34,8 @@ project to avoid accidental dynamic linkage against system-provided versions.
 ## Mellanox NIC support
 
 The production environment uses Mellanox ConnectX NICs (ConnectX-5, ConnectX-6,
-ConnectX-7). The bundled DPDK is currently configured with minimal drivers
-(no mlx5 driver) to keep build times fast during development and unit-test
-focused work. The production target is to enable the `mlx5` PMD and its
-dependencies (libibverbs, rdma-core) in the DPDK build configuration.
+ConnectX-7). The deployment build enables DPDK's `mlx5` PMD with
+`ibverbs_link=dlopen`, stages DPDK's `librte_common_mlx5_glue.so.*` beside
+`ffg`, and still relies on host-provided rdma-core shared libraries such as
+`libibverbs.so` and `libmlx5.so`. Set `MLX5_GLUE_PATH` to the deploy directory
+when the glue library is not in the default loader path.

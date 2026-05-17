@@ -77,6 +77,7 @@ Typical Linux dependencies include:
 - `pkg-config` or `pkgconf`
 - Python 3 with `pyelftools`
 - `libnuma` development headers
+- rdma-core development headers and libraries when building mlx5 support
 
 Build:
 
@@ -84,6 +85,19 @@ Build:
 cmake -S . -B build
 cmake --build build -j2
 ```
+
+To build a mostly-static deployable `ffg` with DPDK mlx5 support:
+
+```sh
+cmake -S . -B build -DPACKET_STATIC_DEPLOY=ON
+cmake --build build --target ffg_deploy -j2
+```
+
+This stages `ffg` and DPDK's mlx5 glue library under `build/deploy/`. The
+binary statically links the C++ runtime and bundled DPDK archives, while glibc,
+`libnuma`, and rdma-core libraries such as `libibverbs.so` and `libmlx5.so`
+remain host-provided. If the glue library is not in the default loader path,
+run with `MLX5_GLUE_PATH` pointing at the deploy directory.
 
 To build only the parser/checker/serializer library and unit tests without DPDK:
 
@@ -140,6 +154,16 @@ environment under the build directory and install the e2e requirements there.
 cmake -S . -B build -DPACKET_BUILD_E2E_TESTS=ON
 cmake --build build -j2
 ctest --test-dir build -R E2ETest --output-on-failure
+```
+
+Run the e2e pytest suite directly through the Python wrapper:
+
+```sh
+python3 tests/e2e/run_pytest.py \
+  --venv build/e2e-venv \
+  --requirements tests/e2e/requirements.txt \
+  --runtime build/ffg \
+  -- tests/e2e
 ```
 
 The e2e suite launches `ffg`, captures packets from `packet_tap0`

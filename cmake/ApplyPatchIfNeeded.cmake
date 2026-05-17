@@ -9,7 +9,7 @@ if(NOT DEFINED PATCH_FILE)
 endif()
 
 execute_process(
-    COMMAND ${GIT_EXECUTABLE} apply --check ${PATCH_FILE}
+    COMMAND ${GIT_EXECUTABLE} apply --directory=. --check ${PATCH_FILE}
     WORKING_DIRECTORY ${PATCH_WORKING_DIR}
     RESULT_VARIABLE patch_applies
     OUTPUT_QUIET
@@ -18,7 +18,7 @@ execute_process(
 
 if(patch_applies EQUAL 0)
     execute_process(
-        COMMAND ${GIT_EXECUTABLE} apply ${PATCH_FILE}
+        COMMAND ${GIT_EXECUTABLE} apply --directory=. ${PATCH_FILE}
         WORKING_DIRECTORY ${PATCH_WORKING_DIR}
         RESULT_VARIABLE apply_result
     )
@@ -29,7 +29,7 @@ if(patch_applies EQUAL 0)
 endif()
 
 execute_process(
-    COMMAND ${GIT_EXECUTABLE} apply --reverse --check ${PATCH_FILE}
+    COMMAND ${GIT_EXECUTABLE} apply --directory=. --reverse --check ${PATCH_FILE}
     WORKING_DIRECTORY ${PATCH_WORKING_DIR}
     RESULT_VARIABLE patch_already_applied
     OUTPUT_QUIET

@@ -8,6 +8,13 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PACKET_BUILD_DPDK "Build the bundled DPDK release and define DPDK::dpdk for future targets" ON)
 option(PACKET_BUILD_E2E_TESTS "Register pytest/scapy DPDK tap end-to-end tests" OFF)
+option(PACKET_STATIC_DEPLOY "Build ffg for mostly-static deployment and stage deploy artifacts" OFF)
+option(PACKET_BUILD_MLX5 "Build bundled DPDK with mlx5 PMD support and dlopen glue" OFF)
+
+if(PACKET_STATIC_DEPLOY AND NOT PACKET_BUILD_MLX5)
+    message(STATUS "PACKET_STATIC_DEPLOY enables PACKET_BUILD_MLX5")
+    set(PACKET_BUILD_MLX5 ON)
+endif()
 
 include(FetchContent)
 
@@ -54,7 +61,32 @@ if(PACKET_BUILD_DPDK)
     set(DPDK_LINK_ARGS_FILE ${CMAKE_CURRENT_BINARY_DIR}/dpdk_link_args.rsp)
     set(DPDK_LIBPCAP_PATCH ${CMAKE_CURRENT_SOURCE_DIR}/patches/dpdk/0001-config-do-not-link-libpcap-when-net-pcap-is-disabled.patch)
     set(DPDK_PKG_CONFIG_PATH ${DPDK_INSTALL_DIR}/lib/x86_64-linux-gnu/pkgconfig:${DPDK_INSTALL_DIR}/lib/pkgconfig:${DPDK_INSTALL_DIR}/share/pkgconfig)
-    set(DPDK_DISABLED_DRIVERS "bus/auxiliary,net/mlx5,net/af_packet,net/af_xdp,net/bnxt,net/e1000,net/ena,net/fm10k,net/i40e,net/ice,net/igc,net/ixgbe,net/virtio,net/vmxnet3,net/ark,net/atlantic,net/avp,net/axgbe,net/bnx2x,net/bond,net/cnxk,net/cxgbe,net/dpaa,net/dpaa2,net/enetc,net/enetfec,net/enic,net/failsafe,net/gve,net/hinic,net/hinic3,net/hns3,net/iavf,net/idpf,net/cpfl,net/ionic,net/mana,net/memif,net/mlx4,net/nbl,net/netvsc,net/nfp,net/ngbe,net/ntnic,net/null,net/octeontx,net/octeon_ep,net/pcap,net/pfe,net/qede,net/r8169,net/ring,net/rnp,net/sfc,net/softnic,net/thunderx,net/txgbe,net/vdev_netvsc,net/xsc,net/zxdh,crypto/*,compress/*,event/*,baseband/*,dma/*,raw/*,regex/*,vdpa/*,common/*")
+    set(DPDK_DISABLED_DRIVER_LIST
+        net/af_packet net/af_xdp net/bnxt net/e1000 net/ena net/fm10k
+        net/i40e net/ice net/igc net/ixgbe net/virtio net/vmxnet3
+        net/ark net/atlantic net/avp net/axgbe net/bnx2x net/bonding
+        net/cnxk net/cxgbe net/dpaa net/dpaa2 net/enetc net/enetfec
+        net/enic net/failsafe net/gve net/hinic net/hinic3 net/hns3
+        net/iavf net/idpf net/cpfl net/ionic net/mana net/memif
+        net/mlx4 net/nbl net/netvsc net/nfp net/ngbe net/ntnic
+        net/null net/octeontx net/octeon_ep net/pcap net/pfe net/qede
+        net/r8169 net/ring net/rnp net/sfc net/softnic net/thunderx
+        net/txgbe net/vdev_netvsc net/xsc net/zxdh
+        crypto/* compress/* event/* baseband/* dma/* raw/* regex/* vdpa/*
+    )
+    if(PACKET_BUILD_MLX5)
+        list(APPEND DPDK_DISABLED_DRIVER_LIST
+            common/cnxk common/cpt common/dpaax common/ionic common/mvep
+            common/nfp common/nitrox common/octeontx common/qat
+            common/sfc_efx common/zsda
+        )
+        set(DPDK_IBVERBS_LINK dlopen)
+    else()
+        list(APPEND DPDK_DISABLED_DRIVER_LIST bus/auxiliary net/mlx5 common/*)
+        set(DPDK_IBVERBS_LINK shared)
+    endif()
+    list(JOIN DPDK_DISABLED_DRIVER_LIST "," DPDK_DISABLED_DRIVERS)
+    set(DPDK_DISABLED_LIBS bpf,metrics,vhost,port,pcapng)
     set(DPDK_MESON_PLATFORM_ARGS)
 
     set(PACKET_APPLE_SILICON_LINUX_VM OFF)
@@ -102,7 +134,8 @@ if(PACKET_BUILD_DPDK)
                 ${DPDK_SOURCE_DIR}
                 ${DPDK_MESON_PLATFORM_ARGS}
                 -Ddisable_drivers=${DPDK_DISABLED_DRIVERS}
-                -Ddisable_libs=bpf,metrics,vhost,port
+                -Ddisable_libs=${DPDK_DISABLED_LIBS}
+                -Dibverbs_link=${DPDK_IBVERBS_LINK}
                 -Ddisable_apps=*
         BUILD_COMMAND ${MESON_EXECUTABLE} compile -C ${DPDK_BUILD_DIR}
         INSTALL_COMMAND ${MESON_EXECUTABLE} install -C ${DPDK_BUILD_DIR}
@@ -119,12 +152,30 @@ if(PACKET_BUILD_DPDK)
                 -DDPDK_LINK_ARGS_FILE=${DPDK_LINK_ARGS_FILE}
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/WriteDpdkPkgConfigArgs.cmake
         DEPENDS dpdk_external
+                ${CMAKE_CURRENT_SOURCE_DIR}/cmake/WriteDpdkPkgConfigArgs.cmake
         VERBATIM
     )
 
     add_custom_target(dpdk_pkgconfig_args
         DEPENDS ${DPDK_COMPILE_ARGS_FILE} ${DPDK_LINK_ARGS_FILE}
     )
+
+    if(PACKET_BUILD_MLX5)
+        set(PACKET_DEPLOY_DIR ${CMAKE_CURRENT_BINARY_DIR}/deploy CACHE PATH "Directory for deployable ffg artifacts")
+        set(DPDK_MLX5_GLUE_STAMP ${CMAKE_CURRENT_BINARY_DIR}/dpdk_mlx5_glue_deploy.stamp)
+        add_custom_command(
+            OUTPUT ${DPDK_MLX5_GLUE_STAMP}
+            COMMAND
+                ${CMAKE_COMMAND}
+                    -DDPDK_INSTALL_DIR=${DPDK_INSTALL_DIR}
+                    -DPACKET_DEPLOY_DIR=${PACKET_DEPLOY_DIR}
+                    -DSTAMP_FILE=${DPDK_MLX5_GLUE_STAMP}
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CopyDpdkMlx5Glue.cmake
+            DEPENDS dpdk_external
+            VERBATIM
+        )
+        add_custom_target(dpdk_mlx5_glue_deploy DEPENDS ${DPDK_MLX5_GLUE_STAMP})
+    endif()
 
     add_library(dpdk INTERFACE)
     add_library(DPDK::dpdk ALIAS dpdk)
@@ -152,6 +203,10 @@ target_include_directories(packet PUBLIC include)
 
 add_executable(ffg apps/dpdk_init.cpp)
 
+if(PACKET_STATIC_DEPLOY)
+    target_link_options(ffg PRIVATE -static-libstdc++ -static-libgcc)
+endif()
+
 if(PACKET_BUILD_DPDK)
     add_library(packet_runtime
         src/dpdk_offload.cpp
@@ -166,6 +221,19 @@ if(PACKET_BUILD_DPDK)
     target_link_libraries(test_runtime packet_runtime gtest_main)
 else()
     target_link_libraries(ffg PRIVATE packet)
+endif()
+
+if(PACKET_STATIC_DEPLOY)
+    set(PACKET_DEPLOY_DIR ${CMAKE_CURRENT_BINARY_DIR}/deploy CACHE PATH "Directory for deployable ffg artifacts")
+    add_custom_target(ffg_deploy
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${PACKET_DEPLOY_DIR}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:ffg> ${PACKET_DEPLOY_DIR}/$<TARGET_FILE_NAME:ffg>
+        DEPENDS ffg
+        VERBATIM
+    )
+    if(TARGET dpdk_mlx5_glue_deploy)
+        add_dependencies(ffg_deploy dpdk_mlx5_glue_deploy)
+    endif()
 endif()
 
 add_executable(test_lexer tests/test_lexer.cpp)

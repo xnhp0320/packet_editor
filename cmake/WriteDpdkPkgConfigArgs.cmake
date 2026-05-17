@@ -35,5 +35,11 @@ endif()
 
 string(STRIP "${compile_args}" compile_args)
 string(STRIP "${link_args}" link_args)
+
+if(link_args MATCHES "(^|[ \t\r\n])-lpcap([ \t\r\n]|$)" OR
+   link_args MATCHES "(^|[ \t\r\n])-l:libpcap\\.a([ \t\r\n]|$)")
+    message(FATAL_ERROR "DPDK static link flags unexpectedly reference libpcap: ${link_args}")
+endif()
+
 file(WRITE "${DPDK_COMPILE_ARGS_FILE}" "${compile_args}\n")
 file(WRITE "${DPDK_LINK_ARGS_FILE}" "${link_args}\n")
