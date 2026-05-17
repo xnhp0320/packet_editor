@@ -322,6 +322,64 @@ TEST(PacketSerializerTest, ModifiedPayloadCanBeFixedUpAgain) {
               0xffff);
 }
 
+TEST(PacketSerializerTest, PlannedSoftwareFixupCanBeReusedAfterRangeMutation) {
+    auto packet = build_constructor(
+        std::format(R"(Ether(type=2048)/IP(src="[192.168.0.1-192.168.0.3]",dst="192.168.0.2",ttl=64,proto={})/UDP(sport=53,dport=54))",
+                    udp_protocol_number));
+    std::vector<std::byte> payload(64);
+    Registry registry;
+
+    auto serialize = serialize_packet(packet, registry, PacketBufferView{payload});
+    ASSERT_TRUE(serialize.ok);
+    auto plan = plan_packet_fixups(packet, registry, PacketBufferView{payload}, serialize.packet_len);
+    ASSERT_TRUE(plan.ok);
+    auto* modifier = find_modifier(serialize, "IP", "src");
+    ASSERT_NE(modifier, nullptr);
+
+    std::string error;
+    ASSERT_TRUE(modifier->apply(payload, 2, error)) << error;
+    auto fixup = fixup_packet(PacketBufferView{payload}, plan.plan);
+
+    ASSERT_TRUE(fixup.ok);
+    EXPECT_EQ(byte_at(payload, 29), 3);
+    EXPECT_EQ(fold(checksum_sum(std::span<const std::byte>{payload}.subspan(14, 20))), 0xffff);
+    EXPECT_EQ(fold(ipv4_udp_pseudo_sum(payload, 14, 8) +
+                   checksum_sum(std::span<const std::byte>{payload}.subspan(34, 8))),
+              0xffff);
+}
+
+TEST(PacketSerializerTest, PlannedHardwareFixupReusesOffloadMetadataAndRefreshesPseudoSeed) {
+    auto packet = build_constructor(
+        std::format(R"(Ether(type=2048)/IP(src="[192.168.0.1-192.168.0.3]",dst="192.168.0.2",ttl=64,proto={})/UDP(sport=53,dport=54))",
+                    udp_protocol_number));
+    std::vector<std::byte> payload(64);
+    Registry registry;
+
+    auto serialize = serialize_packet(packet, registry, PacketBufferView{payload});
+    ASSERT_TRUE(serialize.ok);
+    FixupOptions options;
+    options.ipv4_checksum = FixupMode::HardwareOffload;
+    options.udp_checksum = FixupMode::HardwareOffload;
+    auto plan = plan_packet_fixups(packet, registry, PacketBufferView{payload}, serialize.packet_len, options);
+    ASSERT_TRUE(plan.ok);
+    auto* modifier = find_modifier(serialize, "IP", "src");
+    ASSERT_NE(modifier, nullptr);
+
+    std::string error;
+    ASSERT_TRUE(modifier->apply(payload, 2, error)) << error;
+    auto fixup = fixup_packet(PacketBufferView{payload}, plan.plan);
+
+    ASSERT_TRUE(fixup.ok);
+    EXPECT_EQ(fixup.offload.layer3, OffloadLayer3::IPv4);
+    EXPECT_TRUE(fixup.offload.ipv4_checksum);
+    EXPECT_TRUE(fixup.offload.udp_checksum);
+    EXPECT_EQ(fixup.offload.l2_len, 14);
+    EXPECT_EQ(fixup.offload.l3_len, 20);
+    EXPECT_EQ(fixup.offload.l4_len, 8);
+    EXPECT_EQ(u16_at(payload, 24), 0);
+    EXPECT_EQ(u16_at(payload, 40), fold(ipv4_udp_pseudo_sum(payload, 14, 8)));
+}
+
 TEST(PacketSerializerTest, SoftwareFixupUpdatesLengthsAndChecksums) {
     auto packet = build_constructor(
         std::format(R"(Ether(type=2048)/IP(src="192.168.0.1",dst="192.168.0.2",ttl=64,proto={})/UDP(sport=53,dport=54))",

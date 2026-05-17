@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <variant>
@@ -76,9 +77,61 @@ struct FixupResult {
     PacketOffloadRequest offload;
 };
 
+struct Ipv4Fixup {
+    size_t offset = 0;
+    size_t header_len = 0;
+    FixupMode checksum = FixupMode::Software;
+};
+
+struct Ipv6Fixup {
+    size_t offset = 0;
+    size_t header_len = 40;
+};
+
+struct UdpFixup {
+    size_t offset = 0;
+    FixupMode checksum = FixupMode::Software;
+};
+
+struct TcpFixup {
+    size_t offset = 0;
+    size_t header_len = 0;
+    FixupMode checksum = FixupMode::Software;
+};
+
+struct IcmpFixup {
+    size_t offset = 0;
+    FixupMode checksum = FixupMode::Software;
+};
+
+struct PacketFixupPlan {
+    size_t packet_len = 0;
+    std::optional<Ipv4Fixup> ipv4;
+    std::optional<Ipv6Fixup> ipv6;
+    std::optional<UdpFixup> udp;
+    std::optional<TcpFixup> tcp;
+    std::optional<IcmpFixup> icmp;
+    PacketOffloadRequest offload;
+};
+
+struct FixupPlanResult {
+    bool ok = false;
+    std::vector<std::string> errors;
+    PacketFixupPlan plan;
+};
+
 SerializeResult serialize_packet(const PacketConstructor& packet,
                                  const Registry& registry,
                                  PacketBufferView output);
+
+FixupPlanResult plan_packet_fixups(const PacketConstructor& packet,
+                                   const Registry& registry,
+                                   PacketBufferView buffer,
+                                   size_t packet_len,
+                                   const FixupOptions& options = {});
+
+FixupResult fixup_packet(PacketBufferView buffer,
+                         const PacketFixupPlan& plan);
 
 FixupResult fixup_packet(const PacketConstructor& packet,
                          const Registry& registry,

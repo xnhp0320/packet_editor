@@ -30,6 +30,7 @@ std::optional<PacketConstructor> build_packet_constructor(const Packet& packet,
 
 std::optional<GeneratedPacket> serialize_generated_packet(PacketConstructor packet,
                                                           const Registry& registry,
+                                                          const FixupOptions& fixup_options,
                                                           PacketGenerationResult& result) {
     std::vector<std::byte> payload(generator_max_packet_size);
     auto serialized = serialize_packet(packet, registry, PacketBufferView{payload});
@@ -38,7 +39,17 @@ std::optional<GeneratedPacket> serialize_generated_packet(PacketConstructor pack
         return std::nullopt;
     }
 
-    auto fixed = fixup_packet(packet, registry, PacketBufferView{payload}, serialized.packet_len);
+    auto fixup_plan = plan_packet_fixups(packet,
+                                         registry,
+                                         PacketBufferView{payload},
+                                         serialized.packet_len,
+                                         fixup_options);
+    result.errors.insert(result.errors.end(), fixup_plan.errors.begin(), fixup_plan.errors.end());
+    if (!fixup_plan.ok) {
+        return std::nullopt;
+    }
+
+    auto fixed = fixup_packet(PacketBufferView{payload}, fixup_plan.plan);
     result.errors.insert(result.errors.end(), fixed.errors.begin(), fixed.errors.end());
     if (!fixed.ok) {
         return std::nullopt;
@@ -49,6 +60,7 @@ std::optional<GeneratedPacket> serialize_generated_packet(PacketConstructor pack
         std::move(packet),
         std::move(payload),
         std::move(serialized.modifiers),
+        std::move(fixup_plan.plan),
         serialized.packet_len,
         {},
     };
@@ -102,7 +114,8 @@ PacketGenerator::PacketGenerator(const Registry& registry)
 }
 
 PacketGenerationResult PacketGenerator::prepare(const Packet& packet,
-                                                std::optional<uint64_t> packet_count) const {
+                                                std::optional<uint64_t> packet_count,
+                                                const FixupOptions& fixup_options) const {
     PacketGenerationResult result;
 
     Checker checker{registry_};
@@ -118,7 +131,7 @@ PacketGenerationResult PacketGenerator::prepare(const Packet& packet,
         return result;
     }
 
-    auto generated = serialize_generated_packet(std::move(*constructor), registry_, result);
+    auto generated = serialize_generated_packet(std::move(*constructor), registry_, fixup_options, result);
     if (!generated) {
         return result;
     }
@@ -165,7 +178,7 @@ bool PacketGenerator::apply_flow(const GeneratedPacket& packet,
         return false;
     }
 
-    auto fixed = fixup_packet(packet.constructor, registry_, PacketBufferView{packet_payload}, packet.packet_len);
+    auto fixed = fixup_packet(PacketBufferView{packet_payload}, packet.fixup_plan);
     errors.insert(errors.end(), fixed.errors.begin(), fixed.errors.end());
     return fixed.ok;
 }

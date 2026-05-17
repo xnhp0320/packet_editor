@@ -646,12 +646,13 @@ SerializeResult serialize_packet(const PacketConstructor& packet,
     return result;
 }
 
-FixupResult fixup_packet(const PacketConstructor& packet,
-                         const Registry& registry,
-                         PacketBufferView buffer,
-                         size_t packet_len,
-                         const FixupOptions& options) {
-    FixupResult result;
+FixupPlanResult plan_packet_fixups(const PacketConstructor& packet,
+                                   const Registry& registry,
+                                   PacketBufferView buffer,
+                                   size_t packet_len,
+                                   const FixupOptions& options) {
+    FixupPlanResult result;
+    result.plan.packet_len = packet_len;
     if (buffer.payload.size() < packet_len) {
         result.errors.push_back(std::format("buffer has {} bytes but packet length is {} bytes",
                                             buffer.payload.size(), packet_len));
@@ -671,23 +672,18 @@ FixupResult fixup_packet(const PacketConstructor& packet,
                 const auto ip_len = packet_len - ip->header->offset;
                 if (ip_len > 0xffff) {
                     result.errors.push_back(std::format("IPv4 packet length {} exceeds 16 bits", ip_len));
-                } else {
-                    write_u16(payload, ip->header->offset + 2, static_cast<uint16_t>(ip_len));
                 }
 
-                if (options.ipv4_checksum != FixupMode::Disabled) {
-                    write_u16(payload, ip->header->offset + 10, 0);
-                    if (options.ipv4_checksum == FixupMode::Software) {
-                        write_u16(payload,
-                                  ip->header->offset + 10,
-                                  internet_checksum(checksum_sum(payload.subspan(ip->header->offset,
-                                                                                 ihl_bytes))));
-                    } else {
-                        result.offload.ipv4_checksum = true;
-                        result.offload.layer3 = OffloadLayer3::IPv4;
-                        result.offload.l2_len = ip->header->offset;
-                        result.offload.l3_len = ihl_bytes;
-                    }
+                result.plan.ipv4 = Ipv4Fixup{
+                    ip->header->offset,
+                    ihl_bytes,
+                    options.ipv4_checksum,
+                };
+                if (options.ipv4_checksum == FixupMode::HardwareOffload) {
+                    result.plan.offload.ipv4_checksum = true;
+                    result.plan.offload.layer3 = OffloadLayer3::IPv4;
+                    result.plan.offload.l2_len = ip->header->offset;
+                    result.plan.offload.l3_len = ihl_bytes;
                 }
             }
         }
@@ -701,9 +697,8 @@ FixupResult fixup_packet(const PacketConstructor& packet,
             const auto payload_len = packet_len - ipv6->header->offset - ipv6_header_len;
             if (payload_len > 0xffff) {
                 result.errors.push_back(std::format("IPv6 payload length {} exceeds 16 bits", payload_len));
-            } else {
-                write_u16(payload, ipv6->header->offset + 4, static_cast<uint16_t>(payload_len));
             }
+            result.plan.ipv6 = Ipv6Fixup{ipv6->header->offset, ipv6_header_len};
         }
     }
 
@@ -714,46 +709,29 @@ FixupResult fixup_packet(const PacketConstructor& packet,
             const auto udp_len = packet_len - udp->header->offset;
             if (udp_len > 0xffff) {
                 result.errors.push_back(std::format("UDP length {} exceeds 16 bits", udp_len));
-            } else {
-                write_u16(payload, udp->header->offset + 4, static_cast<uint16_t>(udp_len));
             }
 
+            result.plan.udp = UdpFixup{udp->header->offset, options.udp_checksum};
             if (options.udp_checksum != FixupMode::Disabled) {
-                write_u16(payload, udp->header->offset + 6, 0);
-
-                uint32_t pseudo_sum = 0;
                 bool has_pseudo_header = false;
-                if (auto ip = find_header(packet, registry, "IP")) {
-                    const auto ihl_bytes = static_cast<size_t>(read_u8(payload, ip->header->offset) & 0x0f) * 4;
-                    pseudo_sum = ipv4_pseudo_sum(payload,
-                                                 ip->header->offset,
-                                                 udp_protocol,
-                                                 static_cast<uint16_t>(udp_len));
-                    set_l4_lengths(result.offload, *ip->header, ihl_bytes, 8);
-                    result.offload.layer3 = OffloadLayer3::IPv4;
+                if (result.plan.ipv4) {
+                    result.plan.offload.l2_len = result.plan.ipv4->offset;
+                    result.plan.offload.l3_len = result.plan.ipv4->header_len;
+                    result.plan.offload.l4_len = 8;
+                    result.plan.offload.layer3 = OffloadLayer3::IPv4;
                     has_pseudo_header = true;
-                } else if (auto ipv6 = find_header(packet, registry, "IPv6")) {
-                    pseudo_sum = ipv6_pseudo_sum(payload,
-                                                 ipv6->header->offset,
-                                                 udp_protocol,
-                                                 static_cast<uint32_t>(udp_len));
-                    set_l4_lengths(result.offload, *ipv6->header, 40, 8);
-                    result.offload.layer3 = OffloadLayer3::IPv6;
+                } else if (result.plan.ipv6) {
+                    result.plan.offload.l2_len = result.plan.ipv6->offset;
+                    result.plan.offload.l3_len = result.plan.ipv6->header_len;
+                    result.plan.offload.l4_len = 8;
+                    result.plan.offload.layer3 = OffloadLayer3::IPv6;
                     has_pseudo_header = true;
                 } else {
                     result.errors.push_back("UDP checksum requires IPv4 or IPv6 header");
                 }
 
-                if (has_pseudo_header && options.udp_checksum == FixupMode::Software) {
-                    auto checksum = internet_checksum(pseudo_sum + checksum_sum(payload.subspan(udp->header->offset,
-                                                                                                udp_len)));
-                    if (checksum == 0) {
-                        checksum = 0xffff;
-                    }
-                    write_u16(payload, udp->header->offset + 6, checksum);
-                } else if (has_pseudo_header && options.udp_checksum == FixupMode::HardwareOffload) {
-                    set_udp_checksum_for_offload(payload, udp->header->offset, pseudo_sum);
-                    result.offload.udp_checksum = true;
+                if (has_pseudo_header && options.udp_checksum == FixupMode::HardwareOffload) {
+                    result.plan.offload.udp_checksum = true;
                 }
             }
         }
@@ -762,45 +740,35 @@ FixupResult fixup_packet(const PacketConstructor& packet,
     if (auto tcp = find_header(packet, registry, "TCP")) {
         if (packet_len < tcp->header->offset + 20) {
             result.errors.push_back("TCP header extends beyond packet length");
-        } else if (options.tcp_checksum != FixupMode::Disabled) {
-            write_u16(payload, tcp->header->offset + 16, 0);
+        } else {
             const auto tcp_len = packet_len - tcp->header->offset;
             const auto tcp_header_len = static_cast<size_t>(read_u8(payload, tcp->header->offset + 12) >> 4) * 4;
             if (tcp_header_len < 20 || tcp_header_len > tcp_len) {
                 result.errors.push_back(std::format("invalid TCP header length {} bytes", tcp_header_len));
             }
 
-            uint32_t pseudo_sum = 0;
-            bool has_pseudo_header = false;
-            if (auto ip = find_header(packet, registry, "IP")) {
-                const auto ihl_bytes = static_cast<size_t>(read_u8(payload, ip->header->offset) & 0x0f) * 4;
-                pseudo_sum = ipv4_pseudo_sum(payload,
-                                             ip->header->offset,
-                                             tcp_protocol,
-                                             static_cast<uint16_t>(tcp_len));
-                set_l4_lengths(result.offload, *ip->header, ihl_bytes, tcp_header_len);
-                result.offload.layer3 = OffloadLayer3::IPv4;
-                has_pseudo_header = true;
-            } else if (auto ipv6 = find_header(packet, registry, "IPv6")) {
-                pseudo_sum = ipv6_pseudo_sum(payload,
-                                             ipv6->header->offset,
-                                             tcp_protocol,
-                                             static_cast<uint32_t>(tcp_len));
-                set_l4_lengths(result.offload, *ipv6->header, 40, tcp_header_len);
-                result.offload.layer3 = OffloadLayer3::IPv6;
-                has_pseudo_header = true;
-            } else {
-                result.errors.push_back("TCP checksum requires IPv4 or IPv6 header");
-            }
+            result.plan.tcp = TcpFixup{tcp->header->offset, tcp_header_len, options.tcp_checksum};
+            if (options.tcp_checksum != FixupMode::Disabled) {
+                bool has_pseudo_header = false;
+                if (result.plan.ipv4) {
+                    result.plan.offload.l2_len = result.plan.ipv4->offset;
+                    result.plan.offload.l3_len = result.plan.ipv4->header_len;
+                    result.plan.offload.l4_len = tcp_header_len;
+                    result.plan.offload.layer3 = OffloadLayer3::IPv4;
+                    has_pseudo_header = true;
+                } else if (result.plan.ipv6) {
+                    result.plan.offload.l2_len = result.plan.ipv6->offset;
+                    result.plan.offload.l3_len = result.plan.ipv6->header_len;
+                    result.plan.offload.l4_len = tcp_header_len;
+                    result.plan.offload.layer3 = OffloadLayer3::IPv6;
+                    has_pseudo_header = true;
+                } else {
+                    result.errors.push_back("TCP checksum requires IPv4 or IPv6 header");
+                }
 
-            if (has_pseudo_header && options.tcp_checksum == FixupMode::Software) {
-                write_u16(payload,
-                          tcp->header->offset + 16,
-                          internet_checksum(pseudo_sum + checksum_sum(payload.subspan(tcp->header->offset,
-                                                                                      tcp_len))));
-            } else if (has_pseudo_header && options.tcp_checksum == FixupMode::HardwareOffload) {
-                set_l4_checksum_for_offload(payload, tcp->header->offset, pseudo_sum);
-                result.offload.tcp_checksum = true;
+                if (has_pseudo_header && options.tcp_checksum == FixupMode::HardwareOffload) {
+                    result.plan.offload.tcp_checksum = true;
+                }
             }
         }
     }
@@ -809,21 +777,146 @@ FixupResult fixup_packet(const PacketConstructor& packet,
         icmp && options.icmp_checksum != FixupMode::Disabled) {
         if (packet_len < icmp->header->offset + 4) {
             result.errors.push_back("ICMP header extends beyond packet length");
+        } else if (options.icmp_checksum == FixupMode::HardwareOffload) {
+            result.errors.push_back("ICMP hardware checksum offload is not supported");
         } else {
-            write_u16(payload, icmp->header->offset + 2, 0);
-            if (options.icmp_checksum == FixupMode::Software) {
-                write_u16(payload,
-                          icmp->header->offset + 2,
-                          internet_checksum(checksum_sum(payload.subspan(icmp->header->offset,
-                                                                         packet_len - icmp->header->offset))));
-            } else if (options.icmp_checksum == FixupMode::HardwareOffload) {
-                result.errors.push_back("ICMP hardware checksum offload is not supported");
-            }
+            result.plan.icmp = IcmpFixup{icmp->header->offset, options.icmp_checksum};
         }
     }
 
     result.ok = result.errors.empty();
     return result;
+}
+
+FixupResult fixup_packet(PacketBufferView buffer,
+                         const PacketFixupPlan& plan) {
+    FixupResult result;
+    result.offload = plan.offload;
+    if (buffer.payload.size() < plan.packet_len) {
+        result.errors.push_back(std::format("buffer has {} bytes but packet length is {} bytes",
+                                            buffer.payload.size(), plan.packet_len));
+        return result;
+    }
+
+    auto payload = buffer.payload.subspan(0, plan.packet_len);
+
+    if (plan.ipv4) {
+        const auto& ipv4 = *plan.ipv4;
+        write_u16(payload, ipv4.offset + 2, static_cast<uint16_t>(plan.packet_len - ipv4.offset));
+        if (ipv4.checksum != FixupMode::Disabled) {
+            write_u16(payload, ipv4.offset + 10, 0);
+            if (ipv4.checksum == FixupMode::Software) {
+                write_u16(payload,
+                          ipv4.offset + 10,
+                          internet_checksum(checksum_sum(payload.subspan(ipv4.offset,
+                                                                         ipv4.header_len))));
+            }
+        }
+    }
+
+    if (plan.ipv6) {
+        const auto& ipv6 = *plan.ipv6;
+        const auto payload_len = plan.packet_len - ipv6.offset - ipv6.header_len;
+        write_u16(payload, ipv6.offset + 4, static_cast<uint16_t>(payload_len));
+    }
+
+    if (plan.udp) {
+        const auto& udp = *plan.udp;
+        const auto udp_len = plan.packet_len - udp.offset;
+        write_u16(payload, udp.offset + 4, static_cast<uint16_t>(udp_len));
+        if (udp.checksum != FixupMode::Disabled) {
+            write_u16(payload, udp.offset + 6, 0);
+
+            uint32_t pseudo_sum = 0;
+            bool has_pseudo_header = false;
+            if (plan.ipv4) {
+                pseudo_sum = ipv4_pseudo_sum(payload,
+                                             plan.ipv4->offset,
+                                             udp_protocol,
+                                             static_cast<uint16_t>(udp_len));
+                has_pseudo_header = true;
+            } else if (plan.ipv6) {
+                pseudo_sum = ipv6_pseudo_sum(payload,
+                                             plan.ipv6->offset,
+                                             udp_protocol,
+                                             static_cast<uint32_t>(udp_len));
+                has_pseudo_header = true;
+            }
+
+            if (!has_pseudo_header) {
+                result.errors.push_back("UDP checksum requires IPv4 or IPv6 header");
+            } else if (udp.checksum == FixupMode::Software) {
+                auto checksum = internet_checksum(pseudo_sum + checksum_sum(payload.subspan(udp.offset,
+                                                                                            udp_len)));
+                if (checksum == 0) {
+                    checksum = 0xffff;
+                }
+                write_u16(payload, udp.offset + 6, checksum);
+            } else if (udp.checksum == FixupMode::HardwareOffload) {
+                set_udp_checksum_for_offload(payload, udp.offset, pseudo_sum);
+            }
+        }
+    }
+
+    if (plan.tcp && plan.tcp->checksum != FixupMode::Disabled) {
+        const auto& tcp = *plan.tcp;
+        write_u16(payload, tcp.offset + 16, 0);
+        const auto tcp_len = plan.packet_len - tcp.offset;
+
+        uint32_t pseudo_sum = 0;
+        bool has_pseudo_header = false;
+        if (plan.ipv4) {
+            pseudo_sum = ipv4_pseudo_sum(payload,
+                                         plan.ipv4->offset,
+                                         tcp_protocol,
+                                         static_cast<uint16_t>(tcp_len));
+            has_pseudo_header = true;
+        } else if (plan.ipv6) {
+            pseudo_sum = ipv6_pseudo_sum(payload,
+                                         plan.ipv6->offset,
+                                         tcp_protocol,
+                                         static_cast<uint32_t>(tcp_len));
+            has_pseudo_header = true;
+        }
+
+        if (!has_pseudo_header) {
+            result.errors.push_back("TCP checksum requires IPv4 or IPv6 header");
+        } else if (tcp.checksum == FixupMode::Software) {
+            write_u16(payload,
+                      tcp.offset + 16,
+                      internet_checksum(pseudo_sum + checksum_sum(payload.subspan(tcp.offset,
+                                                                                  tcp_len))));
+        } else if (tcp.checksum == FixupMode::HardwareOffload) {
+            set_l4_checksum_for_offload(payload, tcp.offset, pseudo_sum);
+        }
+    }
+
+    if (plan.icmp && plan.icmp->checksum != FixupMode::Disabled) {
+        write_u16(payload, plan.icmp->offset + 2, 0);
+        write_u16(payload,
+                  plan.icmp->offset + 2,
+                  internet_checksum(checksum_sum(payload.subspan(plan.icmp->offset,
+                                                                 plan.packet_len - plan.icmp->offset))));
+    }
+
+    result.ok = result.errors.empty();
+    return result;
+}
+
+FixupResult fixup_packet(const PacketConstructor& packet,
+                         const Registry& registry,
+                         PacketBufferView buffer,
+                         size_t packet_len,
+                         const FixupOptions& options) {
+    auto plan = plan_packet_fixups(packet, registry, buffer, packet_len, options);
+    if (!plan.ok) {
+        return FixupResult{
+            false,
+            std::move(plan.errors),
+            plan.plan.offload,
+        };
+    }
+    return fixup_packet(buffer, plan.plan);
 }
 
 } // namespace packet

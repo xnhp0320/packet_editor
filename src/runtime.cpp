@@ -1,5 +1,6 @@
 #include "packet/runtime.hpp"
 
+#include "packet/dpdk_offload.hpp"
 #include "packet/packet_generator.hpp"
 
 #include <rte_dev.h>
@@ -341,7 +342,12 @@ bool prepare_batch_packet(WorkerContext& context,
     mbuf.l4_len = 0;
 
     auto payload = std::span{static_cast<std::byte*>(packet_data), context.packet->packet_len};
-    return context.generator->apply_flow(*context.packet, flow_index, payload, context.stats.errors);
+    if (!context.generator->apply_flow(*context.packet, flow_index, payload, context.stats.errors)) {
+        return false;
+    }
+
+    apply_dpdk_offload_request(mbuf, context.packet->fixup_plan.offload);
+    return true;
 }
 
 bool transmit_batch(WorkerContext& context,
@@ -417,6 +423,15 @@ uint64_t checked_total_transmission_count(uint64_t planned_flows,
         return 0;
     }
     return per_worker * worker_count;
+}
+
+FixupOptions live_fixup_options() {
+    FixupOptions options;
+    options.ipv4_checksum = FixupMode::HardwareOffload;
+    options.tcp_checksum = FixupMode::HardwareOffload;
+    options.udp_checksum = FixupMode::HardwareOffload;
+    options.icmp_checksum = FixupMode::Software;
+    return options;
 }
 
 struct FlowRange {
@@ -837,7 +852,7 @@ Runtime::Result Runtime::check(const Program& program, RunOptions options) const
     }
 
     PacketGenerator generator{registry_};
-    auto generated = generator.prepare(config->packet, config->packet_count);
+    auto generated = generator.prepare(config->packet, config->packet_count, live_fixup_options());
     result.warnings.insert(result.warnings.end(), generated.warnings.begin(), generated.warnings.end());
     result.errors.insert(result.errors.end(), generated.errors.begin(), generated.errors.end());
     if (!generated.ok || !generated.packet) {
@@ -893,7 +908,7 @@ Runtime::Result Runtime::run(const Program& program,
     }
 
     PacketGenerator generator{registry_};
-    auto generated = generator.prepare(config->packet, config->packet_count);
+    auto generated = generator.prepare(config->packet, config->packet_count, live_fixup_options());
     result.warnings.insert(result.warnings.end(), generated.warnings.begin(), generated.warnings.end());
     result.errors.insert(result.errors.end(), generated.errors.begin(), generated.errors.end());
     if (!generated.ok || !generated.packet) {
