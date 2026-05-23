@@ -2,6 +2,7 @@
 
 #include "packet/dpdk_offload.hpp"
 #include "packet/packet_generator.hpp"
+#include "packet/stats_format.hpp"
 
 #include <rte_dev.h>
 #include <rte_eal.h>
@@ -16,14 +17,17 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstring>
 #include <format>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -146,6 +150,11 @@ struct WorkerStats {
     std::vector<std::string> errors;
 };
 
+struct PublishedWorkerStats {
+    std::atomic<uint64_t> tx_attempted = 0;
+    std::atomic<uint64_t> tx_sent = 0;
+};
+
 struct WorkerContext {
     uint64_t worker_id = 0;
     uint64_t lcore_id = 0;
@@ -155,11 +164,15 @@ struct WorkerContext {
     uint64_t flow_count = 0;
     uint64_t clone_count = 1;
     bool once = false;
+    bool split = false;
     const std::atomic_bool* stop_requested = nullptr;
     rte_mempool* mbuf_pool = nullptr;
     const PacketGenerator* generator = nullptr;
     const GeneratedPacket* packet = nullptr;
     uint16_t batch_size = runtime_default_tx_batch_size;
+    uint64_t total_pmd_threads = 1;
+    std::optional<uint64_t> stats_interval_seconds;
+    PublishedWorkerStats* published_stats = nullptr;
     WorkerStats stats;
 };
 
@@ -350,6 +363,14 @@ bool prepare_batch_packet(WorkerContext& context,
     return true;
 }
 
+void publish_worker_stats(const WorkerContext& context) {
+    if (context.published_stats == nullptr) {
+        return;
+    }
+    context.published_stats->tx_attempted.store(context.stats.tx_attempted, std::memory_order_relaxed);
+    context.published_stats->tx_sent.store(context.stats.tx_sent, std::memory_order_relaxed);
+}
+
 bool transmit_batch(WorkerContext& context,
                     std::span<rte_mbuf*> packets) {
     const auto packet_count = static_cast<uint16_t>(packets.size());
@@ -392,6 +413,148 @@ bool transmit_batch(WorkerContext& context,
 
     return prepared == packet_count;
 }
+
+struct WorkerStatsView {
+    uint64_t worker_id = 0;
+    uint64_t lcore_id = 0;
+    uint16_t queue_id = 0;
+    uint64_t first_flow = 0;
+    uint64_t flow_count = 0;
+    uint64_t tx_attempted = 0;
+    uint64_t tx_sent = 0;
+};
+
+WorkerStatsView make_worker_stats_view(const WorkerContext& context) {
+    WorkerStatsView view;
+    view.worker_id = context.worker_id;
+    view.lcore_id = context.lcore_id;
+    view.queue_id = context.queue_id;
+    view.first_flow = context.first_flow;
+    view.flow_count = context.flow_count;
+    if (context.published_stats != nullptr) {
+        view.tx_attempted = context.published_stats->tx_attempted.load(std::memory_order_relaxed);
+        view.tx_sent = context.published_stats->tx_sent.load(std::memory_order_relaxed);
+    } else {
+        view.tx_attempted = context.stats.tx_attempted;
+        view.tx_sent = context.stats.tx_sent;
+    }
+    return view;
+}
+
+class LiveStatsDisplay {
+public:
+    explicit LiveStatsDisplay(uint64_t interval_seconds)
+        : interval_(std::chrono::seconds{interval_seconds}),
+          start_(std::chrono::steady_clock::now()),
+          last_(start_),
+          next_(start_ + interval_)
+    {
+    }
+
+    bool refresh_if_due(std::span<const WorkerStatsView> workers,
+                        size_t packet_len,
+                        uint64_t pmd_threads,
+                        uint64_t tx_batch_size,
+                        uint64_t clone_count,
+                        bool split,
+                        bool once) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_) {
+            return false;
+        }
+        refresh(workers, packet_len, pmd_threads, tx_batch_size, clone_count, split, once, now);
+        do {
+            next_ += interval_;
+        } while (next_ <= now);
+        return true;
+    }
+
+private:
+    void refresh(std::span<const WorkerStatsView> workers,
+                 size_t packet_len,
+                 uint64_t pmd_threads,
+                 uint64_t tx_batch_size,
+                 uint64_t clone_count,
+                 bool split,
+                 bool once,
+                 std::chrono::steady_clock::time_point now) {
+        if (previous_sent_.size() != workers.size()) {
+            previous_sent_.assign(workers.size(), 0);
+        }
+
+        const auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(now - start_).count();
+        const auto sample_seconds = std::chrono::duration<double>(now - last_).count();
+        last_ = now;
+
+        uint64_t total_sent = 0;
+        uint64_t total_attempted = 0;
+        uint64_t total_delta = 0;
+        std::vector<uint64_t> worker_deltas;
+        worker_deltas.reserve(workers.size());
+        for (size_t index = 0; index < workers.size(); ++index) {
+            const auto& worker = workers[index];
+            total_sent += worker.tx_sent;
+            total_attempted += worker.tx_attempted;
+            const auto previous = previous_sent_[index];
+            const auto delta = worker.tx_sent >= previous ? worker.tx_sent - previous : uint64_t{0};
+            previous_sent_[index] = worker.tx_sent;
+            total_delta += delta;
+            worker_deltas.push_back(delta);
+        }
+
+        const auto total_pps = sample_seconds > 0.0 ? static_cast<double>(total_delta) / sample_seconds : 0.0;
+        const auto total_bps = total_pps * static_cast<double>(packet_len) * 8.0;
+
+        std::cout << "\033[2J\033[H"
+                  << "FlowForge live stats\n\n"
+                  << "elapsed: " << format_elapsed_seconds(static_cast<uint64_t>(elapsed_seconds)) << '\n'
+                  << "packet_len: " << packet_len << " bytes\n"
+                  << "pmd_threads: " << pmd_threads << '\n'
+                  << "tx_batch_size: " << tx_batch_size << '\n'
+                  << "clone_count: " << clone_count << '\n'
+                  << "split: " << (split ? "on" : "off") << '\n'
+                  << "once: " << (once ? "on" : "off") << "\n\n"
+                  << "total:\n"
+                  << "  sent:      " << format_human_count(static_cast<double>(total_sent)) << " packets\n"
+                  << "  attempted: " << format_human_count(static_cast<double>(total_attempted)) << " packets\n"
+                  << "  pps:       " << format_human_rate(total_pps, "pps") << '\n'
+                  << "  bps:       " << format_human_rate(total_bps, "bps") << "\n\n"
+                  << "workers:\n"
+                  << std::format("  {:<4}{:<8}{:<8}{:<14}{:<14}{:<14}{:<12}{}\n",
+                                 "id",
+                                 "lcore",
+                                 "queue",
+                                 "flows",
+                                 "sent",
+                                 "attempted",
+                                 "pps",
+                                 "bps");
+
+        for (size_t index = 0; index < workers.size(); ++index) {
+            const auto& worker = workers[index];
+            const auto worker_pps = sample_seconds > 0.0
+                ? static_cast<double>(worker_deltas[index]) / sample_seconds
+                : 0.0;
+            const auto worker_bps = worker_pps * static_cast<double>(packet_len) * 8.0;
+            std::cout << std::format("  {:<4}{:<8}{:<8}{:<14}{:<14}{:<14}{:<12}{}\n",
+                                     worker.worker_id,
+                                     worker.lcore_id,
+                                     worker.queue_id,
+                                     std::format("{}+{}", worker.first_flow, worker.flow_count),
+                                     format_human_count(static_cast<double>(worker.tx_sent)),
+                                     format_human_count(static_cast<double>(worker.tx_attempted)),
+                                     format_human_rate(worker_pps, "pps"),
+                                     format_human_rate(worker_bps, "bps"));
+        }
+        std::cout.flush();
+    }
+
+    std::chrono::seconds interval_;
+    std::chrono::steady_clock::time_point start_;
+    std::chrono::steady_clock::time_point last_;
+    std::chrono::steady_clock::time_point next_;
+    std::vector<uint64_t> previous_sent_;
+};
 
 uint64_t checked_transmission_count(uint64_t flow_count,
                                     uint64_t clone_count,
@@ -462,6 +625,11 @@ int run_worker(void* arg) {
         return 0;
     }
 
+    std::optional<LiveStatsDisplay> stats_display;
+    if (context.stats_interval_seconds && context.total_pmd_threads == 1) {
+        stats_display.emplace(*context.stats_interval_seconds);
+    }
+
     do {
         uint64_t transmitted = 0;
         while (transmitted < planned_transmissions &&
@@ -487,9 +655,22 @@ int run_worker(void* arg) {
             }
 
             if (!transmit_batch(context, std::span{batch.data(), count})) {
+                publish_worker_stats(context);
                 return 1;
             }
+            publish_worker_stats(context);
             transmitted += count;
+
+            if (stats_display) {
+                const auto view = make_worker_stats_view(context);
+                stats_display->refresh_if_due(std::span{&view, 1},
+                                              context.packet->packet_len,
+                                              context.total_pmd_threads,
+                                              context.batch_size,
+                                              context.clone_count,
+                                              context.split,
+                                              context.once);
+            }
         }
     } while (!context.once &&
              (context.stop_requested == nullptr ||
@@ -536,11 +717,14 @@ bool transmit_on_main(uint16_t port_id,
     context.flow_count = range.count;
     context.clone_count = options.clone_count;
     context.once = options.once;
+    context.split = options.split;
     context.stop_requested = &runtime_stop_requested;
     context.mbuf_pool = &mbuf_pool;
     context.generator = &generator;
     context.packet = &generated_packet;
     context.batch_size = batch_size;
+    context.total_pmd_threads = 1;
+    context.stats_interval_seconds = options.stats_interval_seconds;
 
     const auto rc = run_worker(&context);
     result.tx_attempted += context.stats.tx_attempted;
@@ -548,6 +732,73 @@ bool transmit_on_main(uint16_t port_id,
     result.workers.push_back(make_worker_result(context));
     result.errors.insert(result.errors.end(), context.stats.errors.begin(), context.stats.errors.end());
     return rc == 0;
+}
+
+std::vector<WorkerStatsView> collect_worker_stats_views(std::span<const WorkerContext> contexts,
+                                                        size_t count) {
+    std::vector<WorkerStatsView> views;
+    views.reserve(count);
+    for (size_t index = 0; index < count; ++index) {
+        views.push_back(make_worker_stats_view(contexts[index]));
+    }
+    return views;
+}
+
+bool wait_for_workers_with_stats(std::span<const unsigned> lcores,
+                                 std::span<const WorkerContext> contexts,
+                                 size_t launched,
+                                 const GeneratedPacket& generated_packet,
+                                 uint16_t batch_size,
+                                 const Runtime::RunOptions& options,
+                                 Runtime::Result& result) {
+    if (!options.stats_interval_seconds) {
+        bool ok = true;
+        for (uint64_t worker = 0; worker < launched; ++worker) {
+            const int rc = rte_eal_wait_lcore(lcores[worker]);
+            if (rc != 0) {
+                ok = false;
+                result.errors.push_back(std::format("PMD worker on lcore {} failed with code {}",
+                                                    lcores[worker],
+                                                    rc));
+            }
+        }
+        return ok;
+    }
+
+    LiveStatsDisplay display{*options.stats_interval_seconds};
+    std::vector<bool> joined(launched, false);
+    size_t joined_count = 0;
+    bool ok = true;
+    while (joined_count < launched) {
+        auto views = collect_worker_stats_views(contexts, launched);
+        display.refresh_if_due(views,
+                               generated_packet.packet_len,
+                               launched,
+                               batch_size,
+                               options.clone_count,
+                               options.split,
+                               options.once);
+
+        for (size_t worker = 0; worker < launched; ++worker) {
+            if (joined[worker] || rte_eal_get_lcore_state(lcores[worker]) != WAIT) {
+                continue;
+            }
+            const int rc = rte_eal_wait_lcore(lcores[worker]);
+            joined[worker] = true;
+            ++joined_count;
+            if (rc != 0) {
+                ok = false;
+                result.errors.push_back(std::format("PMD worker on lcore {} failed with code {}",
+                                                    lcores[worker],
+                                                    rc));
+            }
+        }
+
+        if (joined_count < launched) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{25});
+        }
+    }
+    return ok;
 }
 
 bool transmit_on_workers(uint16_t port_id,
@@ -568,10 +819,13 @@ bool transmit_on_workers(uint16_t port_id,
     }
 
     std::vector<WorkerContext> contexts;
+    std::vector<std::unique_ptr<PublishedWorkerStats>> published_stats;
     contexts.reserve(static_cast<size_t>(requested_workers));
+    published_stats.reserve(static_cast<size_t>(requested_workers));
     uint64_t launched = 0;
     bool ok = true;
     for (uint64_t worker = 0; worker < requested_workers; ++worker) {
+        published_stats.push_back(std::make_unique<PublishedWorkerStats>());
         auto& context = contexts.emplace_back();
         context.worker_id = worker;
         context.lcore_id = lcores[worker];
@@ -585,11 +839,15 @@ bool transmit_on_workers(uint16_t port_id,
         context.flow_count = range.count;
         context.clone_count = options.clone_count;
         context.once = options.once;
+        context.split = options.split;
         context.stop_requested = &runtime_stop_requested;
         context.mbuf_pool = &mbuf_pool;
         context.generator = &generator;
         context.packet = &generated_packet;
         context.batch_size = batch_size;
+        context.total_pmd_threads = requested_workers;
+        context.published_stats = published_stats.back().get();
+        publish_worker_stats(context);
 
         const int rc = rte_eal_remote_launch(run_worker, &context, lcores[worker]);
         if (rc < 0) {
@@ -602,15 +860,13 @@ bool transmit_on_workers(uint16_t port_id,
         ++launched;
     }
 
-    for (uint64_t worker = 0; worker < launched; ++worker) {
-        const int rc = rte_eal_wait_lcore(lcores[worker]);
-        if (rc != 0) {
-            ok = false;
-            result.errors.push_back(std::format("PMD worker on lcore {} failed with code {}",
-                                                lcores[worker],
-                                                rc));
-        }
-    }
+    ok = wait_for_workers_with_stats(std::span{lcores.data(), static_cast<size_t>(launched)},
+                                     contexts,
+                                     static_cast<size_t>(launched),
+                                     generated_packet,
+                                     batch_size,
+                                     options,
+                                     result) && ok;
 
     for (const auto& context : contexts) {
         result.tx_attempted += context.stats.tx_attempted;
@@ -865,6 +1121,7 @@ Runtime::Result Runtime::check(const Program& program, RunOptions options) const
     result.pmd_threads = config->pmd_threads.value_or(1);
     result.tx_batch_size = config->tx_batch_size;
     result.clone_count = options.clone_count;
+    result.stats_interval_seconds = options.stats_interval_seconds;
     result.split = options.split;
     result.once = options.once;
     result.planned_transmissions = checked_total_transmission_count(result.planned_packets,
@@ -920,6 +1177,7 @@ Runtime::Result Runtime::run(const Program& program,
     result.pmd_threads = config->pmd_threads.value_or(1);
     result.tx_batch_size = config->tx_batch_size;
     result.clone_count = options.clone_count;
+    result.stats_interval_seconds = options.stats_interval_seconds;
     result.split = options.split;
     result.once = options.once;
 

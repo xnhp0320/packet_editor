@@ -29,6 +29,7 @@ struct CliOptions {
     std::optional<std::string> output_file;
     std::optional<uint64_t> packet_count;
     uint64_t clone_count = 1;
+    std::optional<uint64_t> stats_interval_seconds;
     bool split = false;
     bool once = false;
     std::vector<std::string> errors;
@@ -55,7 +56,7 @@ void print_usage(std::string_view program_name) {
     std::cerr << "usage:\n"
               << "  " << program_name << " <program-file>\n"
               << "  " << program_name << " <program-file> -o <pcap-file>\n"
-              << "  " << program_name << " <program-file> [--clone <count>] [--split] [--once]\n"
+              << "  " << program_name << " <program-file> [--clone <count>] [--split] [--once] [--stats-interval <sec>]\n"
               << "  " << program_name << " -e <packet-expression> -o <pcap-file> [-c <count>] [--clone <count>]\n";
 }
 
@@ -130,6 +131,22 @@ CliOptions parse_cli(int argc, char** argv) {
                 continue;
             }
             options.clone_count = *count;
+        } else if (arg == "--stats-interval") {
+            if (options.stats_interval_seconds) {
+                options.errors.emplace_back("--stats-interval may only be specified once");
+                continue;
+            }
+            auto value = require_value(arg);
+            if (!value) {
+                continue;
+            }
+            std::string error;
+            auto interval = parse_positive_u64(*value, "stats interval", error);
+            if (!interval) {
+                options.errors.push_back(std::move(error));
+                continue;
+            }
+            options.stats_interval_seconds = *interval;
         } else if (arg == "--split") {
             options.split = true;
         } else if (arg == "--once") {
@@ -264,6 +281,10 @@ int run_file_mode(const CliOptions& options) {
         std::cerr << "ERROR: --once is only valid in live mode\n";
         return 2;
     }
+    if (options.stats_interval_seconds) {
+        std::cerr << "ERROR: --stats-interval is only valid in live mode\n";
+        return 2;
+    }
     if (options.positional.size() > 1) {
         std::cerr << "ERROR: file mode accepts at most one program file\n";
         return 2;
@@ -382,6 +403,7 @@ int run_live_mode(const CliOptions& options, char** argv) {
     run_options.clone_count = options.clone_count;
     run_options.split = options.split;
     run_options.once = options.once;
+    run_options.stats_interval_seconds = options.stats_interval_seconds;
     auto result = runtime.run(*program, argv[0], run_options);
     print_runtime_messages(result);
     if (!result.ok) {
@@ -397,6 +419,10 @@ int run_live_mode(const CliOptions& options, char** argv) {
               << " bytes, pmd_threads " << result.pmd_threads
               << ", tx_batch_size " << result.tx_batch_size
               << ", clone_count " << result.clone_count
+              << ", stats_interval "
+              << (result.stats_interval_seconds
+                      ? std::to_string(*result.stats_interval_seconds)
+                      : std::string{"off"})
               << ", split " << (result.split ? "on" : "off")
               << ", once " << (result.once ? "on" : "off")
               << ", planned_transmissions_per_cycle " << result.planned_transmissions << '\n';

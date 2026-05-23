@@ -193,6 +193,21 @@ PACKET: Ether())");
     EXPECT_EQ(result.planned_transmissions, 1);
 }
 
+TEST(RuntimeTest, StatsIntervalOptionIsReported) {
+    auto program = parse_program(R"(DPDK_ARGS: "--no-huge --no-pci -l 0"
+PACKET: Ether())");
+
+    Runtime runtime;
+    Runtime::RunOptions options;
+    options.stats_interval_seconds = 2;
+    auto result = runtime.check(program, options);
+
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+    ASSERT_TRUE(result.stats_interval_seconds.has_value());
+    EXPECT_EQ(*result.stats_interval_seconds, 2);
+}
+
 TEST(RuntimeTest, CloneCountMustBePositive) {
     auto program = parse_program(R"(DPDK_ARGS: "--no-huge --no-pci -l 0"
 PACKET: Ether())");
