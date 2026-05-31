@@ -81,10 +81,24 @@ The `Registry` class (`src/registry.cpp`) is loaded once at startup with all kno
 
 ### Binary entry point
 
-`apps/dpdk_init.cpp` compiles to `ffg`. It has two modes:
+`apps/dpdk_init.cpp` compiles to `ffg`. It has two modes, plus a capture toggle:
 
-- **Live mode** (no `-o`): reads a `.packet` program file, runs the DPDK tap runtime. Requires `PACKET_BUILD_DPDK=ON`.
+- **Live mode** (no `-o`, no `--capture`): reads a `.packet` program file, runs the DPDK tap runtime. Requires `PACKET_BUILD_DPDK=ON`.
 - **File mode** (`-o <file>`): accepts a program file or an inline `-e` expression, generates flows, writes pcap. Works without DPDK (`PACKET_BUILD_DPDK=OFF` is sufficient).
+- **Capture mode** (`--capture`): RX-only packet capture. When used without `-o`, it runs live RX stats (uses `RX_THREADS` worker lcores). When combined with `-o <file>`, it writes captured packets to a pcap file (main thread only, no remote workers). `PACKET` is optional in capture mode; `--clone`, `--split`, `--once`, and `--stats-interval` are forbidden.
+
+### Live mode program variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `PACKET` | yes | — | Packet expression to transmit |
+| `DPDK_ARGS` | yes | — | EAL arguments (e.g. `"-l 0-3"`) |
+| `PACKET_COUNT` | no | all flows | Cap the number of packets sent |
+| `PMD_THREADS` | no | 1 | Number of TX worker threads (and TX queues) |
+| `RX_THREADS` | no | 0 | Number of dedicated RX capture threads (and RX queues) |
+| `TX_BATCH_SIZE` | no | 32 | TX burst batch size |
+
+When `RX_THREADS` is set, dedicated lcores run `rte_eth_rx_burst()` loops that count received packets and bytes. TX and RX queue counts are independent. The total worker lcore count must satisfy `PMD_THREADS + RX_THREADS <= available workers`.
 
 ### Key types
 

@@ -31,7 +31,7 @@ if(PACKET_BUILD_DPDK)
     include(ExternalProject)
 
     find_program(MESON_EXECUTABLE meson REQUIRED)
-    find_program(GIT_EXECUTABLE git REQUIRED)
+    find_program(PATCH_EXECUTABLE patch REQUIRED)
     find_program(PKG_CONFIG_EXECUTABLE NAMES pkg-config pkgconf REQUIRED)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
@@ -123,7 +123,7 @@ if(PACKET_BUILD_DPDK)
         UPDATE_COMMAND ""
         PATCH_COMMAND
             ${CMAKE_COMMAND}
-                -DGIT_EXECUTABLE=${GIT_EXECUTABLE}
+                -DPATCH_EXECUTABLE=${PATCH_EXECUTABLE}
                 -DPATCH_WORKING_DIR=${DPDK_SOURCE_DIR}
                 -DPATCH_FILE=${DPDK_LIBPCAP_PATCH}
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyPatchIfNeeded.cmake

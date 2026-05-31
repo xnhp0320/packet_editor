@@ -23,6 +23,8 @@ public:
         uint64_t flow_count = 0;
         uint64_t tx_attempted = 0;
         uint64_t tx_sent = 0;
+        uint64_t rx_received = 0;
+        uint64_t rx_bytes = 0;
     };
 
     struct RunOptions {
@@ -30,6 +32,8 @@ public:
         bool split = false;
         bool once = false;
         std::optional<uint64_t> stats_interval_seconds;
+        bool capture = false;
+        std::optional<std::string> capture_file;
     };
 
     struct Result {
@@ -44,13 +48,19 @@ public:
         uint64_t planned_transmissions = 0;
         uint64_t tx_attempted = 0;
         uint64_t tx_sent = 0;
+        uint64_t rx_received = 0;
+        uint64_t rx_bytes = 0;
+        uint64_t rx_missed = 0;
+        uint64_t rx_errors = 0;
         uint64_t pmd_threads = 0;
+        uint64_t rx_threads = 0;
         uint64_t tx_batch_size = 0;
         uint64_t clone_count = 1;
         std::optional<uint64_t> stats_interval_seconds;
         bool split = false;
         bool once = false;
         std::vector<WorkerResult> workers;
+        std::vector<WorkerResult> rx_workers;
     };
 
     Runtime();
@@ -68,11 +78,12 @@ private:
         std::vector<std::string> dpdk_args;
         std::optional<uint64_t> packet_count;
         std::optional<uint64_t> pmd_threads;
+        std::optional<uint64_t> rx_threads;
         uint64_t tx_batch_size = 32;
     };
 
-    static std::optional<Config> build_config(const Program& program, Result& result);
-    std::optional<Config> checked_config(const Program& program, Result& result) const;
+    static std::optional<Config> build_config(const Program& program, Result& result, const RunOptions& options);
+    std::optional<Config> checked_config(const Program& program, Result& result, const RunOptions& options) const;
     static std::optional<std::vector<std::string>> split_dpdk_args(std::string_view args,
                                                                    std::string& error);
 

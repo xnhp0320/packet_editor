@@ -32,6 +32,7 @@ struct CliOptions {
     std::optional<uint64_t> stats_interval_seconds;
     bool split = false;
     bool once = false;
+    bool capture = false;
     std::vector<std::string> errors;
 };
 
@@ -57,7 +58,9 @@ void print_usage(std::string_view program_name) {
               << "  " << program_name << " <program-file>\n"
               << "  " << program_name << " <program-file> -o <pcap-file>\n"
               << "  " << program_name << " <program-file> [--clone <count>] [--split] [--once] [--stats-interval <sec>]\n"
-              << "  " << program_name << " -e <packet-expression> -o <pcap-file> [-c <count>] [--clone <count>]\n";
+              << "  " << program_name << " -e <packet-expression> -o <pcap-file> [-c <count>] [--clone <count>]\n"
+              << "  " << program_name << " <program-file> --capture\n"
+              << "  " << program_name << " <program-file> --capture -o <pcap-file>\n";
 }
 
 std::optional<uint64_t> parse_positive_u64(std::string_view value,
@@ -151,6 +154,8 @@ CliOptions parse_cli(int argc, char** argv) {
             options.split = true;
         } else if (arg == "--once") {
             options.once = true;
+        } else if (arg == "--capture") {
+            options.capture = true;
         } else if (!arg.empty() && arg.front() == '-') {
             options.errors.push_back("unknown option '" + std::string{arg} + "'");
         } else {
@@ -375,9 +380,32 @@ int run_file_mode(const CliOptions& options) {
 }
 
 int run_live_mode(const CliOptions& options, char** argv) {
-    if (options.packet_expression || options.packet_count) {
-        std::cerr << "ERROR: -e and -c are only valid in file mode with -o\n";
-        return 2;
+    if (options.capture) {
+        if (options.packet_expression || options.packet_count) {
+            std::cerr << "ERROR: -e and -c are not valid in capture mode\n";
+            return 2;
+        }
+        if (options.clone_count != 1) {
+            std::cerr << "ERROR: --clone is not valid in capture mode\n";
+            return 2;
+        }
+        if (options.split) {
+            std::cerr << "ERROR: --split is not valid in capture mode\n";
+            return 2;
+        }
+        if (options.once) {
+            std::cerr << "ERROR: --once is not valid in capture mode\n";
+            return 2;
+        }
+        if (options.stats_interval_seconds) {
+            std::cerr << "ERROR: --stats-interval is not valid in capture mode\n";
+            return 2;
+        }
+    } else {
+        if (options.packet_expression || options.packet_count) {
+            std::cerr << "ERROR: -e and -c are only valid in file mode with -o\n";
+            return 2;
+        }
     }
     if (options.positional.size() != 1) {
         print_usage(argv[0]);
@@ -404,10 +432,26 @@ int run_live_mode(const CliOptions& options, char** argv) {
     run_options.split = options.split;
     run_options.once = options.once;
     run_options.stats_interval_seconds = options.stats_interval_seconds;
+    run_options.capture = options.capture;
+    run_options.capture_file = options.output_file;
     auto result = runtime.run(*program, argv[0], run_options);
     print_runtime_messages(result);
     if (!result.ok) {
         return 1;
+    }
+
+    if (options.capture) {
+        std::cout << "Capture completed; rte_eal_init parsed "
+                  << result.eal_parsed_args << " argument(s), port "
+                  << result.port_id << " received " << result.rx_received
+                  << " bytes " << result.rx_bytes
+                  << " missed " << result.rx_missed
+                  << " errors " << result.rx_errors << '\n';
+        if (options.output_file) {
+            std::cout << "Capture written to '" << *options.output_file << "' with "
+                      << result.rx_received << " packet(s)\n";
+        }
+        return 0;
     }
 
     std::cout << "DPDK runtime completed; rte_eal_init parsed "
@@ -417,6 +461,7 @@ int run_live_mode(const CliOptions& options, char** argv) {
               << result.planned_packets << " of " << result.total_flows
               << " flow(s), packet_len " << result.packet_len
               << " bytes, pmd_threads " << result.pmd_threads
+              << ", rx_threads " << result.rx_threads
               << ", tx_batch_size " << result.tx_batch_size
               << ", clone_count " << result.clone_count
               << ", stats_interval "
@@ -435,6 +480,19 @@ int run_live_mode(const CliOptions& options, char** argv) {
                   << " sent " << worker.tx_sent << '/'
                   << worker.tx_attempted << " packet(s)\n";
     }
+    for (const auto& rx : result.rx_workers) {
+        std::cout << "RX worker " << rx.worker_id
+                  << " lcore " << rx.lcore_id
+                  << " queue " << rx.queue_id
+                  << " received " << rx.rx_received
+                  << " bytes " << rx.rx_bytes << "\n";
+    }
+    if (result.rx_threads > 0) {
+        std::cout << "RX aggregate: received " << result.rx_received
+                  << " bytes " << result.rx_bytes
+                  << " missed " << result.rx_missed
+                  << " errors " << result.rx_errors << "\n";
+    }
     return 0;
 #else
     std::cerr << "ERROR: live mode requires a build with PACKET_BUILD_DPDK=ON\n";
@@ -450,6 +508,10 @@ int main(int argc, char** argv) {
         print_messages({}, options.errors);
         print_usage(argv[0]);
         return 2;
+    }
+
+    if (options.capture) {
+        return run_live_mode(options, argv);
     }
 
     if (options.output_file) {

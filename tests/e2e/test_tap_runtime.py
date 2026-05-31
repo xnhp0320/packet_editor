@@ -2,11 +2,12 @@ from collections import Counter
 import re
 
 import pytest
-from scapy.all import ICMP, IP, IPv6, TCP, UDP
+from scapy.all import ICMP, ICMPv6EchoRequest, IP, IPv6, TCP, UDP
 from scapy.layers.vxlan import VXLAN
 
 
 ETHER = 'Ether(dst="ff:ff:ff:ff:ff:ff",src="02:64:74:61:70:00")'
+TAP_IFACE = "packet_tap0"
 WORKER_RE = re.compile(
     r"PMD worker (\d+) lcore (\d+) queue (\d+) flows (\d+)\+(\d+) sent (\d+)/(\d+) packet\(s\)"
 )
@@ -56,7 +57,7 @@ def test_generates_normal_ipv4_l4_packets(packet_program, capture_packets, packe
         ),
         (
             f'{ETHER}/IPv6(src="2001:db8::5",dst="2001:db8::6")/ICMP(type=128,code=0,id=7,seq=9)',
-            ICMP,
+            ICMPv6EchoRequest,
             {"type": 128, "code": 0, "id": 7, "seq": 9},
         ),
     ],
@@ -250,3 +251,49 @@ def test_split_pmd_workers_partition_cartesian_ranges(packet_program, capture_pa
     assert workers[1]["flow_count"] == 2
     assert [worker["sent"] for worker in workers] == [3, 2]
     assert [worker["attempted"] for worker in workers] == [3, 2]
+
+
+@pytest.fixture
+def inject_udp_packet():
+    def send(count: int = 1):
+        import socket
+        from scapy.all import raw, IP, UDP, Ether
+        pkt = Ether(dst="ff:ff:ff:ff:ff:ff", src="02:00:00:00:00:01") / IP(src="10.0.0.1", dst="10.0.0.2") / UDP(sport=1234, dport=5678)
+        data = raw(pkt)
+        with socket.socket(socket.AF_PACKET, socket.SOCK_RAW) as sock:
+            sock.bind((TAP_IFACE, 0))
+            for _ in range(count):
+                sock.send(data)
+    return send
+
+
+def test_capture_stats(run_capture_mode, inject_udp_packet):
+    def inject():
+        inject_udp_packet(count=3)
+
+    result = run_capture_mode(injector=inject)
+    assert "Capture completed" in result.stdout
+    # Parse rx_received from stdout, e.g. "received 3 bytes ..."
+    import re
+    match = re.search(r"received (\d+)", result.stdout)
+    assert match is not None
+    rx_received = int(match.group(1))
+    assert rx_received >= 3
+
+
+def test_capture_to_pcap(run_capture_mode, inject_udp_packet, tmp_path):
+    cap_file = tmp_path / "capture.pcap"
+
+    def inject():
+        inject_udp_packet(count=5)
+
+    result = run_capture_mode(capture_file=cap_file, injector=inject)
+    # Filter for our injected UDP packets (kernel may generate ARP/NDP too)
+    udp_packets = [pkt for pkt in result.packets if pkt.haslayer(UDP)]
+    assert len(udp_packets) == 5
+    for pkt in udp_packets:
+        assert pkt.haslayer(IP)
+        assert pkt[IP].src == "10.0.0.1"
+        assert pkt[IP].dst == "10.0.0.2"
+        assert pkt[UDP].sport == 1234
+        assert pkt[UDP].dport == 5678

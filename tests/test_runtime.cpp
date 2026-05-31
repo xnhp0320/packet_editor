@@ -381,3 +381,40 @@ TEST(RuntimeTest, AppliesDpdkOffloadRequestToMbufMetadata) {
     EXPECT_EQ(mbuf.l3_len, 20);
     EXPECT_EQ(mbuf.l4_len, 8);
 }
+
+TEST(RuntimeTest, RxThreadsIsRuntimeVariable) {
+    auto program = parse_program(R"(DPDK_ARGS: "--no-huge --no-pci -l 0-3"
+RX_THREADS: 2
+PACKET: Ether())");
+
+    Runtime runtime;
+    auto result = runtime.check(program);
+
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.errors.empty());
+    EXPECT_EQ(result.rx_threads, 2);
+}
+
+TEST(RuntimeTest, RxThreadsMustBePositive) {
+    auto program = parse_program(R"(DPDK_ARGS: "--no-huge --no-pci -l 0"
+RX_THREADS: 0
+PACKET: Ether())");
+
+    Runtime runtime;
+    auto result = runtime.check(program);
+
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.errors.size(), 1);
+    EXPECT_EQ(result.errors[0], "variable 'RX_THREADS' must be positive");
+}
+
+TEST(RuntimeTest, RxThreadsDefaultIsZero) {
+    auto program = parse_program(R"(DPDK_ARGS: "--no-huge --no-pci -l 0"
+PACKET: Ether())");
+
+    Runtime runtime;
+    auto result = runtime.check(program);
+
+    EXPECT_TRUE(result.ok);
+    EXPECT_EQ(result.rx_threads, 0);
+}

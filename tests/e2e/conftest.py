@@ -168,3 +168,75 @@ def capture_packets(runtime_binary):
         return packets
 
     return run
+
+
+@dataclass
+class CaptureResult:
+    packets: list
+    stdout: str
+    stderr: str
+
+
+@pytest.fixture
+def run_capture_mode(runtime_binary, tmp_path):
+    def run(
+        *,
+        dpdk_args: str = DEFAULT_DPDK_ARGS,
+        capture_file: Optional[Path] = None,
+        injector: callable,
+        timeout: float = 8.0,
+    ):
+        lines = [f'DPDK_ARGS: "{dpdk_args}"']
+        program = tmp_path / "capture.packet"
+        program.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        args = [str(runtime_binary), str(program), "--capture"]
+        if capture_file:
+            args.extend(["-o", str(capture_file)])
+
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        try:
+            # Poll for DPDK to create the TAP interface
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                import subprocess as sp
+                iface_check = sp.run(["ip", "link", "show", TAP_IFACE], capture_output=True)
+                if iface_check.returncode == 0:
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail(f"TAP interface {TAP_IFACE} did not appear within 10s")
+
+            time.sleep(0.5)
+            injector()
+            time.sleep(0.5)
+            process.terminate()
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            pytest.fail(f"capture mode timed out\nstdout:\n{stdout}\nstderr:\n{stderr}")
+
+        output = stdout + stderr
+        if process.returncode != 0:
+            if permission_error(output):
+                pytest.skip(output.strip())
+            pytest.fail(f"capture mode failed with exit code {process.returncode}\n{output}")
+
+        packets = []
+        if capture_file and capture_file.exists():
+            try:
+                from scapy.all import rdpcap
+                packets = rdpcap(str(capture_file))
+            except Exception as exc:
+                pytest.fail(f"failed to read pcap: {exc}")
+
+        return CaptureResult(packets=packets, stdout=stdout, stderr=stderr)
+
+    return run

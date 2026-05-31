@@ -2,6 +2,7 @@
 
 #include "packet/dpdk_offload.hpp"
 #include "packet/packet_generator.hpp"
+#include "packet/pcap_writer.hpp"
 #include "packet/stats_format.hpp"
 
 #include <rte_dev.h>
@@ -21,6 +22,7 @@
 #include <csignal>
 #include <cstring>
 #include <format>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -52,9 +54,13 @@ constexpr uint16_t runtime_tx_descriptors = 512;
 constexpr unsigned runtime_mbuf_cache_size = 250;
 constexpr uint16_t runtime_default_tx_batch_size = 32;
 constexpr uint16_t runtime_max_tx_batch_size = 256;
+constexpr uint16_t runtime_rx_batch_size = 32;
+constexpr uint16_t runtime_max_rx_batch_size = 128;
 constexpr std::string_view runtime_tap_name = "net_tap0";
 constexpr std::string_view runtime_tap_args = "iface=packet_tap0,mac=fixed";
 constexpr std::string_view runtime_tap_iface = "packet_tap0";
+
+constexpr size_t cache_line_size = 64;
 
 std::atomic_bool runtime_stop_requested = false;
 
@@ -151,9 +157,46 @@ struct WorkerStats {
 };
 
 struct PublishedWorkerStats {
-    std::atomic<uint64_t> tx_attempted = 0;
-    std::atomic<uint64_t> tx_sent = 0;
+    std::atomic<uint64_t> tx_attempted{0};
+    std::atomic<uint64_t> tx_sent{0};
+    uint8_t pad[cache_line_size - 2 * sizeof(std::atomic<uint64_t>)]{};
+
+    PublishedWorkerStats() = default;
+    PublishedWorkerStats(PublishedWorkerStats&& other) noexcept
+        : tx_attempted{other.tx_attempted.load(std::memory_order_relaxed)},
+          tx_sent{other.tx_sent.load(std::memory_order_relaxed)}
+    {
+    }
+    PublishedWorkerStats& operator=(PublishedWorkerStats&& other) noexcept {
+        tx_attempted.store(other.tx_attempted.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        tx_sent.store(other.tx_sent.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        return *this;
+    }
+    PublishedWorkerStats(const PublishedWorkerStats&) = delete;
+    PublishedWorkerStats& operator=(const PublishedWorkerStats&) = delete;
 };
+static_assert(sizeof(PublishedWorkerStats) == cache_line_size);
+
+struct PublishedRxWorkerStats {
+    std::atomic<uint64_t> rx_received{0};
+    std::atomic<uint64_t> rx_bytes{0};
+    uint8_t pad[cache_line_size - 2 * sizeof(std::atomic<uint64_t>)]{};
+
+    PublishedRxWorkerStats() = default;
+    PublishedRxWorkerStats(PublishedRxWorkerStats&& other) noexcept
+        : rx_received{other.rx_received.load(std::memory_order_relaxed)},
+          rx_bytes{other.rx_bytes.load(std::memory_order_relaxed)}
+    {
+    }
+    PublishedRxWorkerStats& operator=(PublishedRxWorkerStats&& other) noexcept {
+        rx_received.store(other.rx_received.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        rx_bytes.store(other.rx_bytes.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        return *this;
+    }
+    PublishedRxWorkerStats(const PublishedRxWorkerStats&) = delete;
+    PublishedRxWorkerStats& operator=(const PublishedRxWorkerStats&) = delete;
+};
+static_assert(sizeof(PublishedRxWorkerStats) == cache_line_size);
 
 struct WorkerContext {
     uint64_t worker_id = 0;
@@ -174,6 +217,22 @@ struct WorkerContext {
     std::optional<uint64_t> stats_interval_seconds;
     PublishedWorkerStats* published_stats = nullptr;
     WorkerStats stats;
+};
+
+struct RxWorkerStats {
+    uint64_t rx_received = 0;
+    uint64_t rx_bytes = 0;
+};
+
+struct RxWorkerContext {
+    uint64_t worker_id = 0;
+    uint64_t lcore_id = 0;
+    uint16_t port_id = 0;
+    uint16_t queue_id = 0;
+    const std::atomic_bool* stop_requested = nullptr;
+    uint16_t batch_size = runtime_rx_batch_size;
+    PublishedRxWorkerStats* published_stats = nullptr;
+    RxWorkerStats stats;
 };
 
 #ifdef __linux__
@@ -266,7 +325,8 @@ bool probe_tap_port(Runtime::Result& result) {
 }
 
 bool configure_and_start_port(uint16_t port_id,
-                              uint16_t queue_count,
+                              uint16_t rx_queue_count,
+                              uint16_t tx_queue_count,
                               rte_mempool& mbuf_pool,
                               Runtime::Result& result) {
     const uint16_t port_count = rte_eth_dev_count_avail();
@@ -282,7 +342,7 @@ bool configure_and_start_port(uint16_t port_id,
     }
 
     rte_eth_conf port_conf{};
-    int rc = rte_eth_dev_configure(port_id, queue_count, queue_count, &port_conf);
+    int rc = rte_eth_dev_configure(port_id, rx_queue_count, tx_queue_count, &port_conf);
     if (rc < 0) {
         result.errors.push_back(std::format("rte_eth_dev_configure failed for port {}: {}",
                                             port_id,
@@ -290,7 +350,7 @@ bool configure_and_start_port(uint16_t port_id,
         return false;
     }
 
-    for (uint16_t queue_id = 0; queue_id < queue_count; ++queue_id) {
+    for (uint16_t queue_id = 0; queue_id < rx_queue_count; ++queue_id) {
         rc = rte_eth_rx_queue_setup(port_id,
                                     queue_id,
                                     runtime_rx_descriptors,
@@ -306,7 +366,7 @@ bool configure_and_start_port(uint16_t port_id,
         }
     }
 
-    for (uint16_t queue_id = 0; queue_id < queue_count; ++queue_id) {
+    for (uint16_t queue_id = 0; queue_id < tx_queue_count; ++queue_id) {
         rc = rte_eth_tx_queue_setup(port_id,
                                     queue_id,
                                     runtime_tx_descriptors,
@@ -371,6 +431,14 @@ void publish_worker_stats(const WorkerContext& context) {
     context.published_stats->tx_sent.store(context.stats.tx_sent, std::memory_order_relaxed);
 }
 
+void publish_rx_worker_stats(const RxWorkerContext& context) {
+    if (context.published_stats == nullptr) {
+        return;
+    }
+    context.published_stats->rx_received.store(context.stats.rx_received, std::memory_order_relaxed);
+    context.published_stats->rx_bytes.store(context.stats.rx_bytes, std::memory_order_relaxed);
+}
+
 bool transmit_batch(WorkerContext& context,
                     std::span<rte_mbuf*> packets) {
     const auto packet_count = static_cast<uint16_t>(packets.size());
@@ -424,6 +492,15 @@ struct WorkerStatsView {
     uint64_t tx_sent = 0;
 };
 
+struct RxWorkerStatsView {
+    uint64_t worker_id = 0;
+    uint64_t lcore_id = 0;
+    uint16_t queue_id = 0;
+    uint64_t rx_received = 0;
+    uint64_t rx_bytes = 0;
+    uint64_t rx_errors = 0;
+};
+
 WorkerStatsView make_worker_stats_view(const WorkerContext& context) {
     WorkerStatsView view;
     view.worker_id = context.worker_id;
@@ -441,6 +518,21 @@ WorkerStatsView make_worker_stats_view(const WorkerContext& context) {
     return view;
 }
 
+RxWorkerStatsView make_rx_worker_stats_view(const RxWorkerContext& context) {
+    RxWorkerStatsView view;
+    view.worker_id = context.worker_id;
+    view.lcore_id = context.lcore_id;
+    view.queue_id = context.queue_id;
+    if (context.published_stats != nullptr) {
+        view.rx_received = context.published_stats->rx_received.load(std::memory_order_relaxed);
+        view.rx_bytes = context.published_stats->rx_bytes.load(std::memory_order_relaxed);
+    } else {
+        view.rx_received = context.stats.rx_received;
+        view.rx_bytes = context.stats.rx_bytes;
+    }
+    return view;
+}
+
 class LiveStatsDisplay {
 public:
     explicit LiveStatsDisplay(uint64_t interval_seconds)
@@ -451,6 +543,7 @@ public:
     {
     }
 
+    // Overload for single TX worker on main lcore (no RX workers)
     bool refresh_if_due(std::span<const WorkerStatsView> workers,
                         size_t packet_len,
                         uint64_t pmd_threads,
@@ -462,7 +555,51 @@ public:
         if (now < next_) {
             return false;
         }
-        refresh(workers, packet_len, pmd_threads, tx_batch_size, clone_count, split, once, now);
+        refresh(workers,
+                {},
+                0,
+                0,
+                packet_len,
+                pmd_threads,
+                0,
+                tx_batch_size,
+                clone_count,
+                split,
+                once,
+                now);
+        do {
+            next_ += interval_;
+        } while (next_ <= now);
+        return true;
+    }
+
+    bool refresh_if_due(std::span<const WorkerStatsView> tx_workers,
+                        std::span<const RxWorkerStatsView> rx_workers,
+                        uint64_t port_imissed,
+                        uint64_t port_ierrors,
+                        size_t packet_len,
+                        uint64_t tx_threads,
+                        uint64_t rx_threads,
+                        uint64_t tx_batch_size,
+                        uint64_t clone_count,
+                        bool split,
+                        bool once) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_) {
+            return false;
+        }
+        refresh(tx_workers,
+                rx_workers,
+                port_imissed,
+                port_ierrors,
+                packet_len,
+                tx_threads,
+                rx_threads,
+                tx_batch_size,
+                clone_count,
+                split,
+                once,
+                now);
         do {
             next_ += interval_;
         } while (next_ <= now);
@@ -470,82 +607,153 @@ public:
     }
 
 private:
-    void refresh(std::span<const WorkerStatsView> workers,
+    void refresh(std::span<const WorkerStatsView> tx_workers,
+                 std::span<const RxWorkerStatsView> rx_workers,
+                 uint64_t port_imissed,
+                 uint64_t port_ierrors,
                  size_t packet_len,
-                 uint64_t pmd_threads,
+                 uint64_t tx_threads,
+                 uint64_t rx_threads,
                  uint64_t tx_batch_size,
                  uint64_t clone_count,
                  bool split,
                  bool once,
                  std::chrono::steady_clock::time_point now) {
-        if (previous_sent_.size() != workers.size()) {
-            previous_sent_.assign(workers.size(), 0);
+        if (previous_tx_sent_.size() != tx_workers.size()) {
+            previous_tx_sent_.assign(tx_workers.size(), 0);
+        }
+        if (previous_rx_received_.size() != rx_workers.size()) {
+            previous_rx_received_.assign(rx_workers.size(), 0);
         }
 
         const auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(now - start_).count();
         const auto sample_seconds = std::chrono::duration<double>(now - last_).count();
         last_ = now;
 
-        uint64_t total_sent = 0;
-        uint64_t total_attempted = 0;
-        uint64_t total_delta = 0;
-        std::vector<uint64_t> worker_deltas;
-        worker_deltas.reserve(workers.size());
-        for (size_t index = 0; index < workers.size(); ++index) {
-            const auto& worker = workers[index];
-            total_sent += worker.tx_sent;
-            total_attempted += worker.tx_attempted;
-            const auto previous = previous_sent_[index];
+        // TX totals
+        uint64_t total_tx_sent = 0;
+        uint64_t total_tx_attempted = 0;
+        uint64_t total_tx_delta = 0;
+        std::vector<uint64_t> tx_deltas;
+        tx_deltas.reserve(tx_workers.size());
+        for (size_t index = 0; index < tx_workers.size(); ++index) {
+            const auto& worker = tx_workers[index];
+            total_tx_sent += worker.tx_sent;
+            total_tx_attempted += worker.tx_attempted;
+            const auto previous = previous_tx_sent_[index];
             const auto delta = worker.tx_sent >= previous ? worker.tx_sent - previous : uint64_t{0};
-            previous_sent_[index] = worker.tx_sent;
-            total_delta += delta;
-            worker_deltas.push_back(delta);
+            previous_tx_sent_[index] = worker.tx_sent;
+            total_tx_delta += delta;
+            tx_deltas.push_back(delta);
         }
 
-        const auto total_pps = sample_seconds > 0.0 ? static_cast<double>(total_delta) / sample_seconds : 0.0;
-        const auto total_bps = total_pps * static_cast<double>(packet_len) * 8.0;
+        const auto total_tx_pps = sample_seconds > 0.0 ? static_cast<double>(total_tx_delta) / sample_seconds : 0.0;
+        const auto total_tx_bps = total_tx_pps * static_cast<double>(packet_len) * 8.0;
+
+        // RX totals
+        uint64_t total_rx_received = 0;
+        uint64_t total_rx_bytes = 0;
+        uint64_t total_rx_delta = 0;
+        std::vector<uint64_t> rx_deltas;
+        rx_deltas.reserve(rx_workers.size());
+        for (size_t index = 0; index < rx_workers.size(); ++index) {
+            const auto& worker = rx_workers[index];
+            total_rx_received += worker.rx_received;
+            total_rx_bytes += worker.rx_bytes;
+            const auto previous = previous_rx_received_[index];
+            const auto delta = worker.rx_received >= previous ? worker.rx_received - previous : uint64_t{0};
+            previous_rx_received_[index] = worker.rx_received;
+            total_rx_delta += delta;
+            rx_deltas.push_back(delta);
+        }
+
+        const auto total_rx_pps = sample_seconds > 0.0 ? static_cast<double>(total_rx_delta) / sample_seconds : 0.0;
+        const auto total_rx_bps = total_rx_pps * static_cast<double>(packet_len) * 8.0;
+
+        const auto imiss_delta = port_imissed >= previous_imissed_ ? port_imissed - previous_imissed_ : uint64_t{0};
+        const auto ierrors_delta = port_ierrors >= previous_ierrors_ ? port_ierrors - previous_ierrors_ : uint64_t{0};
+        previous_imissed_ = port_imissed;
+        previous_ierrors_ = port_ierrors;
 
         std::cout << "\033[2J\033[H"
                   << "FlowForge live stats\n\n"
                   << "elapsed: " << format_elapsed_seconds(static_cast<uint64_t>(elapsed_seconds)) << '\n'
                   << "packet_len: " << packet_len << " bytes\n"
-                  << "pmd_threads: " << pmd_threads << '\n'
-                  << "tx_batch_size: " << tx_batch_size << '\n'
-                  << "clone_count: " << clone_count << '\n'
-                  << "split: " << (split ? "on" : "off") << '\n'
-                  << "once: " << (once ? "on" : "off") << "\n\n"
-                  << "total:\n"
-                  << "  sent:      " << format_human_count(static_cast<double>(total_sent)) << " packets\n"
-                  << "  attempted: " << format_human_count(static_cast<double>(total_attempted)) << " packets\n"
-                  << "  pps:       " << format_human_rate(total_pps, "pps") << '\n'
-                  << "  bps:       " << format_human_rate(total_bps, "bps") << "\n\n"
-                  << "workers:\n"
-                  << std::format("  {:<4}{:<8}{:<8}{:<14}{:<14}{:<14}{:<12}{}\n",
-                                 "id",
-                                 "lcore",
-                                 "queue",
-                                 "flows",
-                                 "sent",
-                                 "attempted",
-                                 "pps",
-                                 "bps");
+                  << "tx_queues: " << tx_threads << "    rx_queues: " << rx_threads << '\n'
+                  << "tx_batch_size: " << tx_batch_size << "    clone_count: " << clone_count << '\n'
+                  << "split: " << (split ? "on" : "off") << "      once: " << (once ? "on" : "off") << "\n\n";
 
-        for (size_t index = 0; index < workers.size(); ++index) {
-            const auto& worker = workers[index];
-            const auto worker_pps = sample_seconds > 0.0
-                ? static_cast<double>(worker_deltas[index]) / sample_seconds
-                : 0.0;
-            const auto worker_bps = worker_pps * static_cast<double>(packet_len) * 8.0;
-            std::cout << std::format("  {:<4}{:<8}{:<8}{:<14}{:<14}{:<14}{:<12}{}\n",
-                                     worker.worker_id,
-                                     worker.lcore_id,
-                                     worker.queue_id,
-                                     std::format("{}+{}", worker.first_flow, worker.flow_count),
-                                     format_human_count(static_cast<double>(worker.tx_sent)),
-                                     format_human_count(static_cast<double>(worker.tx_attempted)),
-                                     format_human_rate(worker_pps, "pps"),
-                                     format_human_rate(worker_bps, "bps"));
+        // TX table
+        if (!tx_workers.empty()) {
+            std::cout << "tx workers:\n"
+                      << std::format("  {:<4}{:<8}{:<8}{:<14}{:<14}{:<14}{:<12}{}\n",
+                                     "id",
+                                     "lcore",
+                                     "queue",
+                                     "flows",
+                                     "sent",
+                                     "attempted",
+                                     "pps",
+                                     "bps");
+
+            for (size_t index = 0; index < tx_workers.size(); ++index) {
+                const auto& worker = tx_workers[index];
+                const auto worker_pps = sample_seconds > 0.0
+                    ? static_cast<double>(tx_deltas[index]) / sample_seconds
+                    : 0.0;
+                const auto worker_bps = worker_pps * static_cast<double>(packet_len) * 8.0;
+                std::cout << std::format("  {:<4}{:<8}{:<8}{:<14}{:<14}{:<14}{:<12}{}\n",
+                                         worker.worker_id,
+                                         worker.lcore_id,
+                                         worker.queue_id,
+                                         std::format("{}+{}", worker.first_flow, worker.flow_count),
+                                         format_human_count(static_cast<double>(worker.tx_sent)),
+                                         format_human_count(static_cast<double>(worker.tx_attempted)),
+                                         format_human_rate(worker_pps, "pps"),
+                                         format_human_rate(worker_bps, "bps"));
+            }
+            std::cout << "  tx total: " << format_human_count(static_cast<double>(total_tx_sent))
+                      << " packets, " << format_human_rate(total_tx_pps, "pps")
+                      << ", " << format_human_rate(total_tx_bps, "bps") << "\n\n";
         }
+
+        // RX table
+        if (!rx_workers.empty()) {
+            std::cout << "rx workers:\n"
+                      << std::format("  {:<4}{:<8}{:<8}{:<14}{:<14}{:<12}{:<12}{}\n",
+                                     "id",
+                                     "lcore",
+                                     "queue",
+                                     "received",
+                                     "bytes",
+                                     "pps",
+                                     "bps",
+                                     "imiss");
+
+            for (size_t index = 0; index < rx_workers.size(); ++index) {
+                const auto& worker = rx_workers[index];
+                const auto worker_pps = sample_seconds > 0.0
+                    ? static_cast<double>(rx_deltas[index]) / sample_seconds
+                    : 0.0;
+                const auto worker_bps = worker_pps * static_cast<double>(packet_len) * 8.0;
+                std::cout << std::format("  {:<4}{:<8}{:<8}{:<14}{:<14}{:<12}{:<12}{}\n",
+                                         worker.worker_id,
+                                         worker.lcore_id,
+                                         worker.queue_id,
+                                         format_human_count(static_cast<double>(worker.rx_received)),
+                                         format_human_count(static_cast<double>(worker.rx_bytes)),
+                                         format_human_rate(worker_pps, "pps"),
+                                         format_human_rate(worker_bps, "bps"),
+                                         format_human_count(static_cast<double>(port_imissed)));
+            }
+            std::cout << "  rx total: " << format_human_count(static_cast<double>(total_rx_received))
+                      << " packets, " << format_human_count(static_cast<double>(total_rx_bytes))
+                      << " bytes, " << format_human_rate(total_rx_pps, "pps")
+                      << ", " << format_human_rate(total_rx_bps, "bps")
+                      << ", imiss: " << format_human_count(static_cast<double>(imiss_delta))
+                      << ", errors: " << format_human_count(static_cast<double>(ierrors_delta)) << "\n\n";
+        }
+
         std::cout.flush();
     }
 
@@ -553,7 +761,10 @@ private:
     std::chrono::steady_clock::time_point start_;
     std::chrono::steady_clock::time_point last_;
     std::chrono::steady_clock::time_point next_;
-    std::vector<uint64_t> previous_sent_;
+    std::vector<uint64_t> previous_tx_sent_;
+    std::vector<uint64_t> previous_rx_received_;
+    uint64_t previous_imissed_ = 0;
+    uint64_t previous_ierrors_ = 0;
 };
 
 uint64_t checked_transmission_count(uint64_t flow_count,
@@ -679,6 +890,34 @@ int run_worker(void* arg) {
     return 0;
 }
 
+int run_rx_worker(void* arg) {
+    auto& context = *static_cast<RxWorkerContext*>(arg);
+    std::array<rte_mbuf*, runtime_max_rx_batch_size> mbufs{};
+
+    while (context.stop_requested == nullptr ||
+           !context.stop_requested->load(std::memory_order_relaxed)) {
+        const uint16_t nb_rx = rte_eth_rx_burst(context.port_id,
+                                                context.queue_id,
+                                                mbufs.data(),
+                                                context.batch_size);
+        if (nb_rx == 0) {
+            continue;
+        }
+
+        uint64_t bytes = 0;
+        for (uint16_t i = 0; i < nb_rx; ++i) {
+            bytes += rte_pktmbuf_pkt_len(mbufs[i]);
+        }
+
+        context.stats.rx_received += nb_rx;
+        context.stats.rx_bytes += bytes;
+        publish_rx_worker_stats(context);
+        rte_pktmbuf_free_bulk(mbufs.data(), nb_rx);
+    }
+
+    return 0;
+}
+
 std::vector<unsigned> worker_lcores() {
     std::vector<unsigned> lcores;
     unsigned lcore_id = 0;
@@ -697,6 +936,22 @@ Runtime::WorkerResult make_worker_result(const WorkerContext& context) {
         context.flow_count,
         context.stats.tx_attempted,
         context.stats.tx_sent,
+        0,
+        0,
+    };
+}
+
+Runtime::WorkerResult make_rx_worker_result(const RxWorkerContext& context) {
+    return Runtime::WorkerResult{
+        context.worker_id,
+        context.lcore_id,
+        context.queue_id,
+        0,
+        0,
+        0,
+        0,
+        context.stats.rx_received,
+        context.stats.rx_bytes,
     };
 }
 
@@ -744,42 +999,74 @@ std::vector<WorkerStatsView> collect_worker_stats_views(std::span<const WorkerCo
     return views;
 }
 
+std::vector<RxWorkerStatsView> collect_rx_worker_stats_views(std::span<const RxWorkerContext> contexts,
+                                                             size_t count) {
+    std::vector<RxWorkerStatsView> views;
+    views.reserve(count);
+    for (size_t index = 0; index < count; ++index) {
+        views.push_back(make_rx_worker_stats_view(contexts[index]));
+    }
+    return views;
+}
+
+bool wait_for_workers(std::span<const unsigned> lcores,
+                      size_t launched,
+                      Runtime::Result& result) {
+    bool ok = true;
+    for (size_t worker = 0; worker < launched; ++worker) {
+        const int rc = rte_eal_wait_lcore(lcores[worker]);
+        if (rc != 0) {
+            ok = false;
+            result.errors.push_back(std::format("worker on lcore {} failed with code {}",
+                                                lcores[worker],
+                                                rc));
+        }
+    }
+    return ok;
+}
+
 bool wait_for_workers_with_stats(std::span<const unsigned> lcores,
-                                 std::span<const WorkerContext> contexts,
-                                 size_t launched,
+                                 size_t total_launched,
+                                 std::span<const WorkerContext> tx_contexts,
+                                 size_t tx_launched,
+                                 std::span<const RxWorkerContext> rx_contexts,
+                                 size_t rx_launched,
+                                 uint16_t port_id,
                                  const GeneratedPacket& generated_packet,
                                  uint16_t batch_size,
                                  const Runtime::RunOptions& options,
                                  Runtime::Result& result) {
     if (!options.stats_interval_seconds) {
-        bool ok = true;
-        for (uint64_t worker = 0; worker < launched; ++worker) {
-            const int rc = rte_eal_wait_lcore(lcores[worker]);
-            if (rc != 0) {
-                ok = false;
-                result.errors.push_back(std::format("PMD worker on lcore {} failed with code {}",
-                                                    lcores[worker],
-                                                    rc));
-            }
-        }
-        return ok;
+        return wait_for_workers(lcores, total_launched, result);
     }
 
     LiveStatsDisplay display{*options.stats_interval_seconds};
-    std::vector<bool> joined(launched, false);
+    std::vector<bool> joined(total_launched, false);
     size_t joined_count = 0;
     bool ok = true;
-    while (joined_count < launched) {
-        auto views = collect_worker_stats_views(contexts, launched);
-        display.refresh_if_due(views,
+
+    while (joined_count < total_launched) {
+        rte_eth_stats eth_stats{};
+        const int stats_rc = rte_eth_stats_get(port_id, &eth_stats);
+        const uint64_t imissed = stats_rc == 0 ? eth_stats.imissed : 0;
+        const uint64_t ierrors = stats_rc == 0 ? eth_stats.ierrors : 0;
+
+        auto tx_views = collect_worker_stats_views(tx_contexts, tx_launched);
+        auto rx_views = collect_rx_worker_stats_views(rx_contexts, rx_launched);
+
+        display.refresh_if_due(tx_views,
+                               rx_views,
+                               imissed,
+                               ierrors,
                                generated_packet.packet_len,
-                               launched,
+                               tx_launched,
+                               rx_launched,
                                batch_size,
                                options.clone_count,
                                options.split,
                                options.once);
 
-        for (size_t worker = 0; worker < launched; ++worker) {
+        for (size_t worker = 0; worker < total_launched; ++worker) {
             if (joined[worker] || rte_eal_get_lcore_state(lcores[worker]) != WAIT) {
                 continue;
             }
@@ -788,51 +1075,68 @@ bool wait_for_workers_with_stats(std::span<const unsigned> lcores,
             ++joined_count;
             if (rc != 0) {
                 ok = false;
-                result.errors.push_back(std::format("PMD worker on lcore {} failed with code {}",
+                result.errors.push_back(std::format("worker on lcore {} failed with code {}",
                                                     lcores[worker],
                                                     rc));
             }
         }
 
-        if (joined_count < launched) {
+        if (joined_count < total_launched) {
             std::this_thread::sleep_for(std::chrono::milliseconds{25});
         }
     }
     return ok;
 }
 
-bool transmit_on_workers(uint16_t port_id,
-                         rte_mempool& mbuf_pool,
-                         const PacketGenerator& generator,
-                         const GeneratedPacket& generated_packet,
-                         uint16_t batch_size,
-                         uint64_t requested_workers,
-                         const Runtime::RunOptions& options,
-                         Runtime::Result& result) {
+bool run_traffic(uint16_t port_id,
+                 rte_mempool& mbuf_pool,
+                 const PacketGenerator& generator,
+                 const GeneratedPacket& generated_packet,
+                 uint16_t batch_size,
+                 uint64_t tx_threads,
+                 uint64_t rx_threads,
+                 const Runtime::RunOptions& options,
+                 Runtime::Result& result) {
     auto lcores = worker_lcores();
-    if (lcores.size() < requested_workers) {
-        result.errors.push_back(std::format("PMD_THREADS requests {} worker lcore(s), but DPDK_ARGS enabled {}; use DPDK_ARGS like \"-l 0-{}\"",
-                                            requested_workers,
+    const auto total_threads = tx_threads + rx_threads;
+    if (lcores.size() < total_threads) {
+        result.errors.push_back(std::format("PMD_THREADS({}) + RX_THREADS({}) requires {} worker lcore(s), but DPDK_ARGS enabled {}; use DPDK_ARGS like \"-l 0-{}\"",
+                                            tx_threads,
+                                            rx_threads,
+                                            total_threads,
                                             lcores.size(),
-                                            requested_workers));
+                                            total_threads));
         return false;
     }
 
-    std::vector<WorkerContext> contexts;
-    std::vector<std::unique_ptr<PublishedWorkerStats>> published_stats;
-    contexts.reserve(static_cast<size_t>(requested_workers));
-    published_stats.reserve(static_cast<size_t>(requested_workers));
-    uint64_t launched = 0;
+    std::vector<WorkerContext> tx_contexts;
+    std::vector<PublishedWorkerStats> tx_published_stats;
+    tx_contexts.reserve(static_cast<size_t>(tx_threads));
+    tx_published_stats.reserve(static_cast<size_t>(tx_threads));
+    for (uint64_t i = 0; i < tx_threads; ++i) {
+        tx_published_stats.emplace_back();
+    }
+
+    std::vector<RxWorkerContext> rx_contexts;
+    std::vector<PublishedRxWorkerStats> rx_published_stats;
+    rx_contexts.reserve(static_cast<size_t>(rx_threads));
+    rx_published_stats.reserve(static_cast<size_t>(rx_threads));
+    for (uint64_t i = 0; i < rx_threads; ++i) {
+        rx_published_stats.emplace_back();
+    }
+
+    size_t total_launched = 0;
     bool ok = true;
-    for (uint64_t worker = 0; worker < requested_workers; ++worker) {
-        published_stats.push_back(std::make_unique<PublishedWorkerStats>());
-        auto& context = contexts.emplace_back();
+
+    // Launch TX workers
+    for (uint64_t worker = 0; worker < tx_threads; ++worker) {
+        auto& context = tx_contexts.emplace_back();
         context.worker_id = worker;
         context.lcore_id = lcores[worker];
         context.port_id = port_id;
         context.queue_id = static_cast<uint16_t>(worker);
         const auto range = assigned_flow_range(generated_packet.flow_plan.planned_packets,
-                                               requested_workers,
+                                               tx_threads,
                                                worker,
                                                options.split);
         context.first_flow = range.first;
@@ -845,35 +1149,73 @@ bool transmit_on_workers(uint16_t port_id,
         context.generator = &generator;
         context.packet = &generated_packet;
         context.batch_size = batch_size;
-        context.total_pmd_threads = requested_workers;
-        context.published_stats = published_stats.back().get();
+        context.total_pmd_threads = tx_threads;
+        context.published_stats = &tx_published_stats[worker];
         publish_worker_stats(context);
 
         const int rc = rte_eal_remote_launch(run_worker, &context, lcores[worker]);
         if (rc < 0) {
-            result.errors.push_back(std::format("rte_eal_remote_launch failed for lcore {}: {}",
+            result.errors.push_back(std::format("rte_eal_remote_launch failed for TX lcore {}: {}",
                                                 lcores[worker],
                                                 rte_strerror(-rc)));
             ok = false;
             break;
         }
-        ++launched;
+        ++total_launched;
     }
 
-    ok = wait_for_workers_with_stats(std::span{lcores.data(), static_cast<size_t>(launched)},
-                                     contexts,
-                                     static_cast<size_t>(launched),
+    const size_t tx_launched = total_launched;
+
+    // Launch RX workers
+    for (uint64_t worker = 0; worker < rx_threads; ++worker) {
+        auto& context = rx_contexts.emplace_back();
+        context.worker_id = worker;
+        context.lcore_id = lcores[tx_threads + worker];
+        context.port_id = port_id;
+        context.queue_id = static_cast<uint16_t>(worker);
+        context.stop_requested = &runtime_stop_requested;
+        context.batch_size = runtime_rx_batch_size;
+        context.published_stats = &rx_published_stats[worker];
+        publish_rx_worker_stats(context);
+
+        const int rc = rte_eal_remote_launch(run_rx_worker, &context, lcores[tx_threads + worker]);
+        if (rc < 0) {
+            result.errors.push_back(std::format("rte_eal_remote_launch failed for RX lcore {}: {}",
+                                                lcores[tx_threads + worker],
+                                                rte_strerror(-rc)));
+            ok = false;
+            break;
+        }
+        ++total_launched;
+    }
+
+    const size_t rx_launched = total_launched - tx_launched;
+
+    ok = wait_for_workers_with_stats(std::span{lcores.data(), total_launched},
+                                     total_launched,
+                                     std::span{tx_contexts.data(), tx_launched},
+                                     tx_launched,
+                                     std::span{rx_contexts.data(), rx_launched},
+                                     rx_launched,
+                                     port_id,
                                      generated_packet,
                                      batch_size,
                                      options,
                                      result) && ok;
 
-    for (const auto& context : contexts) {
+    for (const auto& context : tx_contexts) {
         result.tx_attempted += context.stats.tx_attempted;
         result.tx_sent += context.stats.tx_sent;
         result.workers.push_back(make_worker_result(context));
         result.errors.insert(result.errors.end(), context.stats.errors.begin(), context.stats.errors.end());
     }
+
+    for (const auto& context : rx_contexts) {
+        result.rx_received += context.stats.rx_received;
+        result.rx_bytes += context.stats.rx_bytes;
+        result.rx_workers.push_back(make_rx_worker_result(context));
+    }
+
     return ok;
 }
 
@@ -967,7 +1309,7 @@ std::optional<std::vector<std::string>> Runtime::split_dpdk_args(std::string_vie
     return result;
 }
 
-std::optional<Runtime::Config> Runtime::build_config(const Program& program, Result& result) {
+std::optional<Runtime::Config> Runtime::build_config(const Program& program, Result& result, const RunOptions& options /*= RunOptions{}*/) {
     std::unordered_map<std::string_view, const Variable*> variables;
 
     for (const auto& variable : program.variables) {
@@ -979,7 +1321,7 @@ std::optional<Runtime::Config> Runtime::build_config(const Program& program, Res
     }
 
     auto packet_it = variables.find("PACKET");
-    if (packet_it == variables.end()) {
+    if (packet_it == variables.end() && !options.capture) {
         result.errors.emplace_back("missing mandatory variable 'PACKET'");
     }
 
@@ -994,11 +1336,13 @@ std::optional<Runtime::Config> Runtime::build_config(const Program& program, Res
 
     Config config;
 
-    auto packet_value = evaluate(packet_it->second->expression);
-    if (!std::holds_alternative<Packet>(packet_value)) {
-        result.errors.emplace_back("variable 'PACKET' must be a packet expression");
-    } else {
-        config.packet = std::get<Packet>(std::move(packet_value));
+    if (packet_it != variables.end()) {
+        auto packet_value = evaluate(packet_it->second->expression);
+        if (!std::holds_alternative<Packet>(packet_value)) {
+            result.errors.emplace_back("variable 'PACKET' must be a packet expression");
+        } else {
+            config.packet = std::get<Packet>(std::move(packet_value));
+        }
     }
 
     auto dpdk_args_value = evaluate(dpdk_args_it->second->expression);
@@ -1046,6 +1390,23 @@ std::optional<Runtime::Config> Runtime::build_config(const Program& program, Res
         }
     }
 
+    auto rx_threads_it = variables.find("RX_THREADS");
+    if (rx_threads_it != variables.end()) {
+        auto rx_threads_value = evaluate(rx_threads_it->second->expression);
+        if (!std::holds_alternative<int64_t>(rx_threads_value)) {
+            result.errors.emplace_back("variable 'RX_THREADS' must be an integer expression");
+        } else {
+            const auto rx_threads = std::get<int64_t>(rx_threads_value);
+            if (rx_threads <= 0) {
+                result.errors.emplace_back("variable 'RX_THREADS' must be positive");
+            } else if (rx_threads > std::numeric_limits<uint16_t>::max()) {
+                result.errors.emplace_back("variable 'RX_THREADS' exceeds the supported Rx queue count");
+            } else {
+                config.rx_threads = static_cast<uint64_t>(rx_threads);
+            }
+        }
+    }
+
     auto tx_batch_size_it = variables.find("TX_BATCH_SIZE");
     if (tx_batch_size_it != variables.end()) {
         auto tx_batch_size_value = evaluate(tx_batch_size_it->second->expression);
@@ -1067,7 +1428,7 @@ std::optional<Runtime::Config> Runtime::build_config(const Program& program, Res
     for (const auto& variable : program.variables) {
         if (variable.name != "PACKET" && variable.name != "DPDK_ARGS" &&
             variable.name != "PACKET_COUNT" && variable.name != "PMD_THREADS" &&
-            variable.name != "TX_BATCH_SIZE") {
+            variable.name != "RX_THREADS" && variable.name != "TX_BATCH_SIZE") {
             result.warnings.push_back(std::format("unknown runtime variable '{}'", variable.name));
         }
     }
@@ -1078,8 +1439,8 @@ std::optional<Runtime::Config> Runtime::build_config(const Program& program, Res
     return config;
 }
 
-std::optional<Runtime::Config> Runtime::checked_config(const Program& program, Result& result) const {
-    auto config = build_config(program, result);
+std::optional<Runtime::Config> Runtime::checked_config(const Program& program, Result& result, const RunOptions& options /*= RunOptions{}*/) const {
+    auto config = build_config(program, result, options);
     if (!config) {
         return std::nullopt;
     }
@@ -1102,8 +1463,16 @@ Runtime::Result Runtime::check(const Program& program) const {
 
 Runtime::Result Runtime::check(const Program& program, RunOptions options) const {
     Result result;
-    auto config = build_config(program, result);
+    auto config = build_config(program, result, options);
     if (!config) {
+        return result;
+    }
+
+    if (options.capture) {
+        result.pmd_threads = config->pmd_threads.value_or(1);
+        result.rx_threads = config->rx_threads.value_or(0);
+        result.tx_batch_size = config->tx_batch_size;
+        result.ok = true;
         return result;
     }
 
@@ -1119,6 +1488,7 @@ Runtime::Result Runtime::check(const Program& program, RunOptions options) const
     result.total_flows = generated.packet->flow_plan.total_flows;
     result.planned_packets = generated.packet->flow_plan.planned_packets;
     result.pmd_threads = config->pmd_threads.value_or(1);
+    result.rx_threads = config->rx_threads.value_or(0);
     result.tx_batch_size = config->tx_batch_size;
     result.clone_count = options.clone_count;
     result.stats_interval_seconds = options.stats_interval_seconds;
@@ -1137,7 +1507,7 @@ Runtime::Result Runtime::check(const Program& program, RunOptions options) const
 
 Runtime::Result Runtime::init(const Program& program, std::string_view eal_program_name) {
     Result result;
-    auto config = checked_config(program, result);
+    auto config = checked_config(program, result, RunOptions{});
     if (!config) {
         return result;
     }
@@ -1159,8 +1529,207 @@ Runtime::Result Runtime::run(const Program& program,
                              std::string_view eal_program_name,
                              RunOptions options) {
     Result result;
-    auto config = build_config(program, result);
+    auto config = build_config(program, result, options);
     if (!config) {
+        return result;
+    }
+
+    if (options.capture) {
+        result.pmd_threads = config->pmd_threads.value_or(1);
+        result.rx_threads = config->rx_threads.value_or(0);
+        result.tx_batch_size = config->tx_batch_size;
+
+        if (!check_tap_permission(result)) {
+            result.ok = false;
+            return result;
+        }
+
+        if (init_eal(std::move(config->dpdk_args), eal_program_name, result) < 0) {
+            result.ok = false;
+            return result;
+        }
+
+        const auto rx_threads = config->rx_threads.value_or(0);
+        const auto total_threads = rx_threads;
+
+        if (total_threads > 1) {
+            const auto lcores = worker_lcores();
+            if (lcores.size() < total_threads) {
+                result.errors.push_back(std::format("RX_THREADS({}) requires {} worker lcore(s), but DPDK_ARGS enabled {}; use DPDK_ARGS like \"-l 0-{}\"",
+                                                    rx_threads,
+                                                    total_threads,
+                                                    lcores.size(),
+                                                    total_threads));
+                cleanup_eal(result);
+                result.ok = false;
+                return result;
+            }
+        }
+
+        bool port_started = false;
+        const auto tx_queue_count = uint16_t{1};
+        const auto rx_queue_count = rx_threads > 0 ? static_cast<uint16_t>(rx_threads) : uint16_t{1};
+        SignalGuard signal_guard;
+
+        rte_mempool* pool = rte_pktmbuf_pool_create("packet_capture_mbuf_pool",
+                                                     8191,
+                                                     runtime_mbuf_cache_size,
+                                                     0,
+                                                     RTE_MBUF_DEFAULT_BUF_SIZE,
+                                                     rte_socket_id());
+        if (pool == nullptr) {
+            result.errors.push_back(std::format("rte_pktmbuf_pool_create failed: {}", rte_strerror(rte_errno)));
+            cleanup_eal(result);
+            result.ok = false;
+            return result;
+        }
+
+        std::optional<PcapWriter> pcap_writer;
+        std::optional<std::ofstream> capture_stream;
+        if (options.capture_file) {
+            capture_stream.emplace(*options.capture_file, std::ios::binary);
+            if (!capture_stream->is_open()) {
+                result.errors.push_back(std::format("failed to open capture file '{}'", *options.capture_file));
+                rte_mempool_free(pool);
+                cleanup_eal(result);
+                result.ok = false;
+                return result;
+            }
+            pcap_writer.emplace(*capture_stream);
+            auto write_result = pcap_writer->write_header();
+            if (!write_result.ok) {
+                result.errors.insert(result.errors.end(), write_result.errors.begin(), write_result.errors.end());
+                rte_mempool_free(pool);
+                cleanup_eal(result);
+                result.ok = false;
+                return result;
+            }
+        }
+
+        if (probe_tap_port(result) &&
+            configure_and_start_port(runtime_port_id, rx_queue_count, tx_queue_count, *pool, result)) {
+            port_started = true;
+
+            if (options.capture_file) {
+                // Main-thread RX loop with pcap writing
+                std::array<rte_mbuf*, runtime_max_rx_batch_size> mbufs{};
+                while (!runtime_stop_requested.load(std::memory_order_relaxed)) {
+                    const uint16_t nb_rx = rte_eth_rx_burst(runtime_port_id,
+                                                            0,
+                                                            mbufs.data(),
+                                                            runtime_rx_batch_size);
+                    if (nb_rx == 0) {
+                        continue;
+                    }
+
+                    uint64_t bytes = 0;
+                    for (uint16_t i = 0; i < nb_rx; ++i) {
+                        auto* data = rte_pktmbuf_mtod(mbufs[i], const std::byte*);
+                        auto len = rte_pktmbuf_pkt_len(mbufs[i]);
+                        std::span<const std::byte> payload(data, len);
+                        auto write_result = pcap_writer->write_packet(payload);
+                        if (!write_result.ok) {
+                            result.errors.insert(result.errors.end(), write_result.errors.begin(), write_result.errors.end());
+                            break;
+                        }
+                        bytes += len;
+                    }
+
+                    result.rx_received += nb_rx;
+                    result.rx_bytes += bytes;
+                    rte_pktmbuf_free_bulk(mbufs.data(), nb_rx);
+
+                    if (!result.errors.empty()) {
+                        break;
+                    }
+                }
+            } else {
+                // Stats-only capture: launch remote RX workers if configured
+                if (total_threads > 1) {
+                    std::vector<RxWorkerContext> rx_contexts;
+                    std::vector<PublishedRxWorkerStats> rx_published_stats;
+                    rx_contexts.reserve(static_cast<size_t>(rx_threads));
+                    rx_published_stats.reserve(static_cast<size_t>(rx_threads));
+                    for (uint64_t i = 0; i < rx_threads; ++i) {
+                        rx_published_stats.emplace_back();
+                    }
+
+                    auto lcores = worker_lcores();
+                    size_t launched = 0;
+                    bool ok = true;
+
+                    for (uint64_t worker = 0; worker < rx_threads; ++worker) {
+                        auto& context = rx_contexts.emplace_back();
+                        context.worker_id = worker;
+                        context.lcore_id = lcores[worker];
+                        context.port_id = runtime_port_id;
+                        context.queue_id = static_cast<uint16_t>(worker);
+                        context.stop_requested = &runtime_stop_requested;
+                        context.batch_size = runtime_rx_batch_size;
+                        context.published_stats = &rx_published_stats[worker];
+                        publish_rx_worker_stats(context);
+
+                        const int rc = rte_eal_remote_launch(run_rx_worker, &context, lcores[worker]);
+                        if (rc < 0) {
+                            result.errors.push_back(std::format("rte_eal_remote_launch failed for RX lcore {}: {}",
+                                                                lcores[worker],
+                                                                rte_strerror(-rc)));
+                            ok = false;
+                            break;
+                        }
+                        ++launched;
+                    }
+
+                    if (ok) {
+                        // Wait for signal, then workers finish
+                        for (size_t worker = 0; worker < launched; ++worker) {
+                            rte_eal_wait_lcore(lcores[worker]);
+                        }
+                    } else {
+                        // Workers may still be running; signal stop and wait
+                        runtime_stop_requested.store(true, std::memory_order_relaxed);
+                        for (size_t worker = 0; worker < launched; ++worker) {
+                            rte_eal_wait_lcore(lcores[worker]);
+                        }
+                    }
+
+                    for (const auto& context : rx_contexts) {
+                        result.rx_received += context.stats.rx_received;
+                        result.rx_bytes += context.stats.rx_bytes;
+                        result.rx_workers.push_back(make_rx_worker_result(context));
+                    }
+                } else {
+                    // Single RX worker on main thread
+                    RxWorkerContext context{};
+                    context.worker_id = 0;
+                    context.lcore_id = rte_lcore_id();
+                    context.port_id = runtime_port_id;
+                    context.queue_id = 0;
+                    context.stop_requested = &runtime_stop_requested;
+                    context.batch_size = runtime_rx_batch_size;
+                    run_rx_worker(&context);
+                    result.rx_received += context.stats.rx_received;
+                    result.rx_bytes += context.stats.rx_bytes;
+                    result.rx_workers.push_back(make_rx_worker_result(context));
+                }
+            }
+        }
+
+        if (port_started) {
+            rte_eth_stats eth_stats{};
+            if (rte_eth_stats_get(runtime_port_id, &eth_stats) == 0) {
+                result.rx_missed = eth_stats.imissed;
+                result.rx_errors = eth_stats.ierrors;
+            }
+            stop_and_close_port(runtime_port_id, result);
+        }
+
+        pcap_writer.reset();
+        capture_stream.reset();
+        rte_mempool_free(pool);
+        cleanup_eal(result);
+
+        result.ok = result.errors.empty();
         return result;
     }
 
@@ -1175,6 +1744,7 @@ Runtime::Result Runtime::run(const Program& program,
     result.total_flows = generated.packet->flow_plan.total_flows;
     result.planned_packets = generated.packet->flow_plan.planned_packets;
     result.pmd_threads = config->pmd_threads.value_or(1);
+    result.rx_threads = config->rx_threads.value_or(0);
     result.tx_batch_size = config->tx_batch_size;
     result.clone_count = options.clone_count;
     result.stats_interval_seconds = options.stats_interval_seconds;
@@ -1199,13 +1769,19 @@ Runtime::Result Runtime::run(const Program& program,
         return result;
     }
 
-    if (config->pmd_threads) {
+    const auto tx_threads = config->pmd_threads.value_or(1);
+    const auto rx_threads = config->rx_threads.value_or(0);
+    const auto total_threads = tx_threads + rx_threads;
+
+    if (total_threads > 1) {
         const auto lcores = worker_lcores();
-        if (lcores.size() < *config->pmd_threads) {
-            result.errors.push_back(std::format("PMD_THREADS requests {} worker lcore(s), but DPDK_ARGS enabled {}; use DPDK_ARGS like \"-l 0-{}\"",
-                                                *config->pmd_threads,
+        if (lcores.size() < total_threads) {
+            result.errors.push_back(std::format("PMD_THREADS({}) + RX_THREADS({}) requires {} worker lcore(s), but DPDK_ARGS enabled {}; use DPDK_ARGS like \"-l 0-{}\"",
+                                                tx_threads,
+                                                rx_threads,
+                                                total_threads,
                                                 lcores.size(),
-                                                *config->pmd_threads));
+                                                total_threads));
             cleanup_eal(result);
             result.ok = false;
             return result;
@@ -1213,24 +1789,25 @@ Runtime::Result Runtime::run(const Program& program,
     }
 
     bool port_started = false;
-    const auto worker_count = config->pmd_threads.value_or(1);
-    const auto queue_count = static_cast<uint16_t>(worker_count);
+    const auto tx_queue_count = static_cast<uint16_t>(tx_threads);
+    const auto rx_queue_count = rx_threads > 0 ? static_cast<uint16_t>(rx_threads) : tx_queue_count;
     const auto batch_size = static_cast<uint16_t>(config->tx_batch_size);
     SignalGuard signal_guard;
-    auto mbuf_pool = make_mbuf_pool(*generated.packet, worker_count, batch_size, result);
+    auto mbuf_pool = make_mbuf_pool(*generated.packet, tx_threads, batch_size, result);
     if (mbuf_pool != nullptr &&
         probe_tap_port(result) &&
-        configure_and_start_port(runtime_port_id, queue_count, *mbuf_pool, result)) {
+        configure_and_start_port(runtime_port_id, rx_queue_count, tx_queue_count, *mbuf_pool, result)) {
         port_started = true;
-        if (config->pmd_threads) {
-            transmit_on_workers(runtime_port_id,
-                                *mbuf_pool,
-                                generator,
-                                *generated.packet,
-                                batch_size,
-                                *config->pmd_threads,
-                                options,
-                                result);
+        if (total_threads > 1) {
+            run_traffic(runtime_port_id,
+                        *mbuf_pool,
+                        generator,
+                        *generated.packet,
+                        batch_size,
+                        tx_threads,
+                        rx_threads,
+                        options,
+                        result);
         } else {
             transmit_on_main(runtime_port_id,
                              *mbuf_pool,
@@ -1243,6 +1820,11 @@ Runtime::Result Runtime::run(const Program& program,
     }
 
     if (port_started) {
+        rte_eth_stats eth_stats{};
+        if (rte_eth_stats_get(runtime_port_id, &eth_stats) == 0) {
+            result.rx_missed = eth_stats.imissed;
+            result.rx_errors = eth_stats.ierrors;
+        }
         stop_and_close_port(runtime_port_id, result);
     }
 
