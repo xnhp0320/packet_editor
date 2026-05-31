@@ -12,6 +12,7 @@ import pytest
 
 scapy = pytest.importorskip("scapy.all")
 from scapy.all import Ether  # noqa: E402
+from scapy.layers.inet6 import ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6ND_RS, ICMPv6ND_RA  # noqa: E402
 
 
 TAP_IFACE = "packet_tap0"
@@ -93,7 +94,16 @@ def permission_error(output: str) -> bool:
 
 
 def is_runtime_packet(packet) -> bool:
-    return Ether in packet and packet.src == RUNTIME_SRC_MAC and packet.type == 0x0800
+    if Ether not in packet or packet.src != RUNTIME_SRC_MAC:
+        return False
+    if packet.type == 0x0800:
+        return True
+    if packet.type == 0x86dd:
+        for nd in (ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6ND_RS, ICMPv6ND_RA):
+            if nd in packet:
+                return False
+        return True
+    return False
 
 
 def capture_runtime_packets(capture: socket.socket, expected_count: int, timeout: float):

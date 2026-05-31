@@ -2,7 +2,7 @@ from collections import Counter
 import re
 
 import pytest
-from scapy.all import ICMP, IP, TCP, UDP
+from scapy.all import ICMP, IP, IPv6, TCP, UDP
 from scapy.layers.vxlan import VXLAN
 
 
@@ -36,6 +36,35 @@ def test_generates_normal_ipv4_l4_packets(packet_program, capture_packets, packe
     packets = capture_packets(packet_program(packet, packet_count=1), 1)
 
     assert IP in packets[0]
+    assert layer in packets[0]
+    for field, value in checks.items():
+        assert getattr(packets[0][layer], field) == value
+
+
+@pytest.mark.parametrize(
+    ("packet", "layer", "checks"),
+    [
+        (
+            f'{ETHER}/IPv6(src="2001:db8::1",dst="2001:db8::2")/TCP(sport=1234,dport=80,flags=2)',
+            TCP,
+            {"sport": 1234, "dport": 80},
+        ),
+        (
+            f'{ETHER}/IPv6(src="2001:db8::3",dst="2001:db8::4")/UDP(sport=1235,dport=53)',
+            UDP,
+            {"sport": 1235, "dport": 53},
+        ),
+        (
+            f'{ETHER}/IPv6(src="2001:db8::5",dst="2001:db8::6")/ICMP(type=128,code=0,id=7,seq=9)',
+            ICMP,
+            {"type": 128, "code": 0, "id": 7, "seq": 9},
+        ),
+    ],
+)
+def test_generates_normal_ipv6_l4_packets(packet_program, capture_packets, packet, layer, checks):
+    packets = capture_packets(packet_program(packet, packet_count=1), 1)
+
+    assert IPv6 in packets[0]
     assert layer in packets[0]
     for field, value in checks.items():
         assert getattr(packets[0][layer], field) == value
@@ -96,6 +125,23 @@ def test_generates_cartesian_ipv4_and_tcp_port_ranges(packet_program, capture_pa
     assert flows == {
         (ip, port)
         for ip in ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"]
+        for port in [10000, 10001, 10002]
+    }
+
+
+def test_generates_cartesian_ipv6_and_tcp_port_ranges(packet_program, capture_packets):
+    program = packet_program(
+        f'{ETHER}/IPv6(src="[2001:db8::1-2001:db8::4]",dst="2001:db8::ff")/'
+        'TCP(sport="[10000-10002]",dport=443,flags=2)',
+        packet_count=12,
+    )
+
+    packets = capture_packets(program, 12)
+    flows = {(packet[IPv6].src, packet[TCP].sport) for packet in packets}
+
+    assert flows == {
+        (ip, port)
+        for ip in ["2001:db8::1", "2001:db8::2", "2001:db8::3", "2001:db8::4"]
         for port in [10000, 10001, 10002]
     }
 

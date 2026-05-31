@@ -21,15 +21,38 @@ std::string Parser::last_error() const {
     return lexer_.last_error();
 }
 
+namespace {
+
+constexpr std::string_view token_type_name(TokenType type) {
+    switch (type) {
+        case TokenType::Identifier:     return "identifier";
+        case TokenType::StringLiteral:  return "string literal";
+        case TokenType::IntegerLiteral: return "integer literal";
+        case TokenType::Equal:          return "'='";
+        case TokenType::LeftParen:      return "'('";
+        case TokenType::RightParen:     return "')'";
+        case TokenType::Comma:          return "','";
+        case TokenType::Slash:          return "'/'";
+        case TokenType::Colon:          return "':'";
+        case TokenType::EndOfFile:      return "end of file";
+    }
+    return "unknown token";
+}
+
+} // namespace
+
 bool Parser::consume(TokenType expected) {
     if (lexer_.peek().type == expected) {
         lexer_.next();
         return true;
     }
-    error_ = "expected token type ";
-    error_ += std::to_string(static_cast<int>(expected));
+    error_ = "expected ";
+    error_ += token_type_name(expected);
     error_ += " but got ";
-    error_ += std::to_string(static_cast<int>(lexer_.peek().type));
+    error_ += token_type_name(lexer_.peek().type);
+    error_ += " '";
+    error_ += std::string(lexer_.peek().lexeme);
+    error_ += "'";
     return false;
 }
 
@@ -136,7 +159,8 @@ std::optional<ValueType> Parser::parse_value() {
         lexer_.next();
         auto val = parse_string_value(val_tok.lexeme);
         if (!val) {
-            error_ = "invalid string escape sequence";
+            error_ = "invalid string escape sequence in ";
+            error_ += std::string(val_tok.lexeme);
             return std::nullopt;
         }
         return val;
@@ -146,13 +170,19 @@ std::optional<ValueType> Parser::parse_value() {
         lexer_.next();
         auto val = parse_number_value(val_tok.lexeme);
         if (!val) {
-            error_ = "invalid integer literal";
+            error_ = "invalid integer literal '";
+            error_ += std::string(val_tok.lexeme);
+            error_ += "'";
             return std::nullopt;
         }
         return val;
     }
 
-    error_ = "expected string or integer value";
+    error_ = "expected string or integer value but got ";
+    error_ += token_type_name(lexer_.peek().type);
+    error_ += " '";
+    error_ += std::string(lexer_.peek().lexeme);
+    error_ += "'";
     return std::nullopt;
 }
 
@@ -170,6 +200,11 @@ std::optional<Expression> Parser::scalar_value_to_expression(ValueType value) {
 std::optional<Header> Parser::parse_header() {
     Token proto_tok = lexer_.peek();
     if (proto_tok.type != TokenType::Identifier) {
+        error_ = "expected protocol name but got ";
+        error_ += token_type_name(proto_tok.type);
+        error_ += " '";
+        error_ += std::string(proto_tok.lexeme);
+        error_ += "'";
         return std::nullopt;
     }
     std::string protocol(proto_tok.lexeme);
@@ -244,7 +279,11 @@ std::optional<Expression> Parser::parse_expression() {
 std::optional<Variable> Parser::parse_variable() {
     Token name_tok = lexer_.peek();
     if (name_tok.type != TokenType::Identifier) {
-        error_ = "expected variable name";
+        error_ = "expected variable name but got ";
+        error_ += token_type_name(name_tok.type);
+        error_ += " '";
+        error_ += std::string(name_tok.lexeme);
+        error_ += "'";
         return std::nullopt;
     }
 
@@ -284,7 +323,11 @@ std::optional<Packet> Parser::parse_packet() {
     }
 
     if (lexer_.peek().type != TokenType::EndOfFile) {
-        error_ = "unexpected token after packet";
+        error_ = "unexpected token '";
+        error_ += std::string(lexer_.peek().lexeme);
+        error_ += "' (";
+        error_ += token_type_name(lexer_.peek().type);
+        error_ += ") after packet";
         return std::nullopt;
     }
 

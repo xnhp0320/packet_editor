@@ -93,15 +93,15 @@ bool apply_flow_index(std::span<std::byte> payload,
                       const std::vector<PayloadFieldModifier>& modifiers,
                       uint64_t flow_index,
                       std::vector<std::string>& errors) {
-    uint64_t divisor = 1;
+    uint64_t remaining = flow_index;
     for (const auto& modifier : modifiers) {
-        const auto value_index = (flow_index / divisor) % modifier.value_count;
+        const auto value_index = remaining % modifier.value_count;
+        remaining /= modifier.value_count;
         std::string error;
         if (!modifier.apply(payload, value_index, error)) {
             errors.push_back(std::move(error));
             return false;
         }
-        divisor *= modifier.value_count;
     }
     return true;
 }
