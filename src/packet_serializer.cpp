@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <cstdint>
 #include <format>
 #include <limits>
@@ -93,8 +94,13 @@ void write_bits(std::span<std::byte> payload, size_t bit_offset, size_t bit_widt
 }
 
 void write_bytes(std::span<std::byte> payload, size_t bit_offset, std::span<const uint8_t> bytes) {
-    for (size_t index = 0; index < bytes.size(); ++index) {
-        write_bits(payload, bit_offset + index * 8, 8, bytes[index]);
+    if (bit_offset % 8 == 0) {
+        const size_t byte_offset = bit_offset / 8;
+        std::memcpy(payload.data() + byte_offset, bytes.data(), bytes.size());
+    } else {
+        for (size_t index = 0; index < bytes.size(); ++index) {
+            write_bits(payload, bit_offset + index * 8, 8, bytes[index]);
+        }
     }
 }
 
