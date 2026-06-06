@@ -18,11 +18,20 @@ endif()
 
 include(FetchContent)
 
-FetchContent_Declare(
-    googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.15.2
-)
+# Offline support: set PACKET_GOOGLETEST_DIR to a local googletest source tree.
+if(DEFINED ENV{PACKET_GOOGLETEST_DIR} AND EXISTS "$ENV{PACKET_GOOGLETEST_DIR}/CMakeLists.txt")
+    FetchContent_Declare(
+        googletest
+        SOURCE_DIR $ENV{PACKET_GOOGLETEST_DIR}
+    )
+    message(STATUS "Using local googletest: $ENV{PACKET_GOOGLETEST_DIR}")
+else()
+    FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG v1.15.2
+    )
+endif()
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
@@ -52,8 +61,16 @@ if(PACKET_BUILD_DPDK)
     endif()
 
     set(DPDK_VERSION v25.11.2)
-    set(DPDK_URL https://github.com/DPDK/dpdk/archive/refs/tags/${DPDK_VERSION}.tar.gz)
-    set(DPDK_URL_HASH SHA256=009c69c6d1e715e38219d3bbff42188bf6eddc4fd85f0028126e3ca3d6989571)
+
+    # Offline support: set PACKET_DPDK_TARBALL to a local DPDK tarball path.
+    if(DEFINED ENV{PACKET_DPDK_TARBALL} AND EXISTS "$ENV{PACKET_DPDK_TARBALL}")
+        set(DPDK_URL "file://$ENV{PACKET_DPDK_TARBALL}")
+        set(DPDK_URL_HASH "")
+        message(STATUS "Using local DPDK tarball: $ENV{PACKET_DPDK_TARBALL}")
+    else()
+        set(DPDK_URL https://github.com/DPDK/dpdk/archive/refs/tags/${DPDK_VERSION}.tar.gz)
+        set(DPDK_URL_HASH SHA256=009c69c6d1e715e38219d3bbff42188bf6eddc4fd85f0028126e3ca3d6989571)
+    endif()
     set(DPDK_SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/dpdk-src)
     set(DPDK_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/dpdk-build)
     set(DPDK_INSTALL_DIR ${CMAKE_CURRENT_BINARY_DIR}/dpdk-install)
