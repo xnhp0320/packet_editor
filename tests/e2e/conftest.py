@@ -106,19 +106,26 @@ def is_runtime_packet(packet) -> bool:
     return False
 
 
-def capture_runtime_packets(capture: socket.socket, expected_count: int, timeout: float):
+def capture_runtime_packets(
+    capture: socket.socket,
+    expected_count: int,
+    timeout: float,
+    process: Optional[subprocess.Popen] = None,
+):
     packets = []
     deadline = time.monotonic() + timeout
     while len(packets) < expected_count and time.monotonic() < deadline:
         wait = min(0.1, max(0.0, deadline - time.monotonic()))
         readable, _, _ = select.select([capture], [], [], wait)
-        if not readable:
-            continue
+        if readable:
+            data, _ = capture.recvfrom(65535)
+            packet = Ether(data)
+            if is_runtime_packet(packet):
+                packets.append(packet)
 
-        data, _ = capture.recvfrom(65535)
-        packet = Ether(data)
-        if is_runtime_packet(packet):
-            packets.append(packet)
+        if process is not None and process.poll() is not None:
+            break
+
     return packets
 
 
@@ -144,7 +151,7 @@ def capture_packets(runtime_binary):
                 text=True,
             )
 
-            packets = capture_runtime_packets(capture, expected_count, timeout)
+            packets = capture_runtime_packets(capture, expected_count, timeout, process=process)
 
         try:
             stdout, stderr = process.communicate(timeout=1)
