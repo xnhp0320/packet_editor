@@ -7,6 +7,16 @@ template into a set of flows.
 
 The command-line binary is `ffg`.
 
+## Performance
+
+On a Mellanox ConnectX NIC with the bundled DPDK mlx5 PMD, FlowForge reaches
+approximately **13 Mpps per core** for 42-byte UDP packets in live mode. For
+comparison, [dperf](https://github.com/baidu/dperf) reports around **16 Mpps per
+core** for a similar workload. The current gap is dominated by per-packet
+modifier application (`PayloadFieldModifier::apply` and `apply_flow_index`):
+every transmitted packet is individually updated from the base template before
+length/checksum fixup and TX burst.
+
 ## Features
 
 - Scapy-like packet construction syntax:
