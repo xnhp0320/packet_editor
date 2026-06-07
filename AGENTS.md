@@ -53,6 +53,29 @@ ctest --test-dir build -R E2ETest --output-on-failure
 
 Unit tests use GoogleTest (fetched at build time via `FetchContent`). Each test executable is a standalone binary. E2E tests launch `ffg`, capture packets from the TAP interface `packet_tap0` with Scapy, and validate the emitted packets.
 
+### E2E test baseline
+
+| Metric | Value | Date |
+|---|---|---|
+| Total cases | 17 | — |
+| Pass time | ~3.2s | 2026-06-07 |
+| Log location | `build/Testing/Temporary/LastTest.log` | — |
+
+**Any code change that affects the runtime or DPDK build must run E2E tests as the final acceptance step.** Unit tests alone are not sufficient.
+
+### Viewing E2E logs without re-running
+
+```sh
+# Full log from the last ctest run
+cat build/Testing/Temporary/LastTest.log
+
+# Failed tests only
+cat build/Testing/Temporary/LastTestsFailed.log
+
+# Filter pytest output from the log
+grep -E 'PASSED|FAILED|ERROR|SKIPPED|runtime failed|stderr:|stdout:' build/Testing/Temporary/LastTest.log
+```
+
 ## Architecture
 
 ### Processing pipeline
