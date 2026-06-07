@@ -77,7 +77,13 @@ if(PACKET_BUILD_DPDK)
     set(DPDK_COMPILE_ARGS_FILE ${CMAKE_CURRENT_BINARY_DIR}/dpdk_compile_args.rsp)
     set(DPDK_LINK_ARGS_FILE ${CMAKE_CURRENT_BINARY_DIR}/dpdk_link_args.rsp)
     set(DPDK_LIBPCAP_PATCH ${CMAKE_CURRENT_SOURCE_DIR}/patches/dpdk/0001-config-do-not-link-libpcap-when-net-pcap-is-disabled.patch)
-    set(DPDK_PKG_CONFIG_PATH ${DPDK_INSTALL_DIR}/lib/x86_64-linux-gnu/pkgconfig:${DPDK_INSTALL_DIR}/lib/pkgconfig:${DPDK_INSTALL_DIR}/share/pkgconfig)
+    file(GLOB DPDK_ARCH_PKGCONFIG_DIRS LIST_DIRECTORIES true "${DPDK_INSTALL_DIR}/lib/*-linux-gnu/pkgconfig")
+    if(DPDK_ARCH_PKGCONFIG_DIRS)
+        list(GET DPDK_ARCH_PKGCONFIG_DIRS 0 DPDK_ARCH_PKGCONFIG_DIR)
+        set(DPDK_PKG_CONFIG_PATH "${DPDK_ARCH_PKGCONFIG_DIR}:${DPDK_INSTALL_DIR}/lib/pkgconfig:${DPDK_INSTALL_DIR}/share/pkgconfig")
+    else()
+        set(DPDK_PKG_CONFIG_PATH "${DPDK_INSTALL_DIR}/lib/pkgconfig:${DPDK_INSTALL_DIR}/share/pkgconfig")
+    endif()
     set(DPDK_DISABLED_DRIVER_LIST
         net/af_packet net/af_xdp net/bnxt net/e1000 net/ena net/fm10k
         net/i40e net/ice net/igc net/ixgbe net/virtio net/vmxnet3
