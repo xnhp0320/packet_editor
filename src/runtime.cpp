@@ -796,7 +796,7 @@ FlowRange assigned_flow_range(uint64_t planned_flows,
     return FlowRange{first, count};
 }
 
-int run_worker(void* arg) {
+int run_worker_once(void* arg) {
     auto& context = *static_cast<WorkerContext*>(arg);
     std::array<rte_mbuf*, runtime_max_tx_batch_size> batch{};
     const auto planned_transmissions = context.flow_count * context.clone_count;
@@ -804,40 +804,73 @@ int run_worker(void* arg) {
         return 0;
     }
 
-    do {
-        uint64_t transmitted = 0;
-        while (transmitted < planned_transmissions &&
-               (context.stop_requested == nullptr ||
-                !context.stop_requested->load(std::memory_order_relaxed))) {
-            const auto remaining = planned_transmissions - transmitted;
-            const auto count = static_cast<uint16_t>(std::min<uint64_t>(context.batch_size, remaining));
-            if (rte_pktmbuf_alloc_bulk(context.mbuf_pool, batch.data(), count) != 0) {
-                context.stats.errors.push_back(std::format("rte_pktmbuf_alloc_bulk failed for {} packet(s): {}",
-                                                           count,
-                                                           rte_strerror(rte_errno)));
-                return 1;
-            }
-
-            uint16_t prepared_count = 0;
-            for (; prepared_count < count; ++prepared_count) {
-                const auto local_transmission = transmitted + prepared_count;
-                const auto flow_index = context.first_flow + local_transmission / context.clone_count;
-                if (!prepare_batch_packet(context, *batch[prepared_count], flow_index)) {
-                    free_unsent(batch.data(), 0, count);
-                    return 1;
-                }
-            }
-
-            if (!transmit_batch(context, std::span{batch.data(), count})) {
-                publish_worker_stats(context);
-                return 1;
-            }
-            publish_worker_stats(context);
-            transmitted += count;
+    uint64_t transmitted = 0;
+    while (transmitted < planned_transmissions &&
+           (context.stop_requested == nullptr ||
+            !context.stop_requested->load(std::memory_order_relaxed))) {
+        const auto remaining = planned_transmissions - transmitted;
+        const auto count = static_cast<uint16_t>(std::min<uint64_t>(context.batch_size, remaining));
+        if (rte_pktmbuf_alloc_bulk(context.mbuf_pool, batch.data(), count) != 0) {
+            context.stats.errors.push_back(std::format("rte_pktmbuf_alloc_bulk failed for {} packet(s): {}",
+                                                       count,
+                                                       rte_strerror(rte_errno)));
+            return 1;
         }
-    } while (!context.once &&
-             (context.stop_requested == nullptr ||
-              !context.stop_requested->load(std::memory_order_relaxed)));
+
+        for (uint16_t i = 0; i < count; ++i) {
+            const auto flow_index = context.first_flow + (transmitted + i) / context.clone_count;
+            if (!prepare_batch_packet(context, *batch[i], flow_index)) {
+                free_unsent(batch.data(), 0, count);
+                return 1;
+            }
+        }
+
+        if (!transmit_batch(context, std::span{batch.data(), count})) {
+            publish_worker_stats(context);
+            return 1;
+        }
+        publish_worker_stats(context);
+        transmitted += count;
+    }
+
+    return 0;
+}
+
+int run_worker(void* arg) {
+    auto& context = *static_cast<WorkerContext*>(arg);
+    std::array<rte_mbuf*, runtime_max_tx_batch_size> batch{};
+    if (context.flow_count == 0) {
+        return 0;
+    }
+
+    uint64_t global_transmission = 0;
+    while (context.stop_requested == nullptr ||
+           !context.stop_requested->load(std::memory_order_relaxed)) {
+        const auto count = static_cast<uint16_t>(context.batch_size);
+        if (rte_pktmbuf_alloc_bulk(context.mbuf_pool, batch.data(), count) != 0) {
+            context.stats.errors.push_back(std::format("rte_pktmbuf_alloc_bulk failed for {} packet(s): {}",
+                                                       count,
+                                                       rte_strerror(rte_errno)));
+            return 1;
+        }
+
+        for (uint16_t i = 0; i < count; ++i) {
+            const auto local_transmission = global_transmission + i;
+            const auto flow_index = context.first_flow +
+                                    (local_transmission / context.clone_count) % context.flow_count;
+            if (!prepare_batch_packet(context, *batch[i], flow_index)) {
+                free_unsent(batch.data(), 0, count);
+                return 1;
+            }
+        }
+
+        if (!transmit_batch(context, std::span{batch.data(), count})) {
+            publish_worker_stats(context);
+            return 1;
+        }
+        publish_worker_stats(context);
+        global_transmission += count;
+    }
 
     return 0;
 }
@@ -1072,7 +1105,8 @@ bool run_traffic(uint16_t port_id,
         context.published_stats = &tx_published_stats[worker];
         publish_worker_stats(context);
 
-        const int rc = rte_eal_remote_launch(run_worker, &context, lcores[worker]);
+        const auto worker_fn = context.once ? run_worker_once : run_worker;
+        const int rc = rte_eal_remote_launch(worker_fn, &context, lcores[worker]);
         if (rc < 0) {
             result.errors.push_back(std::format("rte_eal_remote_launch failed for TX lcore {}: {}",
                                                 lcores[worker],
