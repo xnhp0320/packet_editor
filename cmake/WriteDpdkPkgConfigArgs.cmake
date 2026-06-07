@@ -11,7 +11,20 @@ if(NOT DEFINED DPDK_LINK_ARGS_FILE)
     message(FATAL_ERROR "DPDK_LINK_ARGS_FILE is required")
 endif()
 
-set(ENV{PKG_CONFIG_PATH} "${DPDK_PKG_CONFIG_PATH}")
+# Dynamically discover the architecture-specific pkgconfig directory
+# (e.g. lib/x86_64-linux-gnu/pkgconfig or lib/aarch64-linux-gnu/pkgconfig).
+# This must run at build time, after DPDK has been installed.
+if(DEFINED DPDK_INSTALL_DIR)
+    file(GLOB DPDK_ARCH_PKGCONFIG_DIRS LIST_DIRECTORIES true "${DPDK_INSTALL_DIR}/lib/*-linux-gnu/pkgconfig")
+    if(DPDK_ARCH_PKGCONFIG_DIRS)
+        list(GET DPDK_ARCH_PKGCONFIG_DIRS 0 DPDK_ARCH_PKGCONFIG_DIR)
+        set(ENV{PKG_CONFIG_PATH} "${DPDK_ARCH_PKGCONFIG_DIR}:${DPDK_INSTALL_DIR}/lib/pkgconfig:${DPDK_INSTALL_DIR}/share/pkgconfig")
+    else()
+        set(ENV{PKG_CONFIG_PATH} "${DPDK_INSTALL_DIR}/lib/pkgconfig:${DPDK_INSTALL_DIR}/share/pkgconfig")
+    endif()
+else()
+    set(ENV{PKG_CONFIG_PATH} "${DPDK_PKG_CONFIG_PATH}")
+endif()
 
 execute_process(
     COMMAND ${PKG_CONFIG_EXECUTABLE} --cflags libdpdk
