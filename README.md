@@ -31,6 +31,8 @@ length/checksum fixup and TX burst.
   IP(src="[10.0.0.1-10.0.0.4]")/TCP(sport="[10000-10002]",dport=443)
   ```
 
+  To keep the lexer simple, FlowForge only recognizes numbers and strings.
+  A range is a special string literal written as `"A-B"` or `"[a, c-d]"`.
   The runtime expands packet field ranges as a Cartesian product and transmits
   each planned flow once unless `PACKET_COUNT` caps the run.
 
